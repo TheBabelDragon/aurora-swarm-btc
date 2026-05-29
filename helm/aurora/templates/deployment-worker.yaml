@@ -19,10 +19,6 @@ spec:
         - configMapRef:
             name: aurora-mining-config
         env:
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
         - name: REDIS_URL
           value: "redis://aurora-redis:6379/0"
         resources:

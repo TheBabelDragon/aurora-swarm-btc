@@ -1,1 +1,1 @@
-print('Aurora Scheduler - They yearn for the mines')
+print("Aurora Scheduler - They yearn for the mines")
