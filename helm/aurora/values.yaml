@@ -1,0 +1,21 @@
+replicaCount: 2
+
+image:
+  worker: ghcr.io/yourusername/aurora-btc-worker:latest
+  scheduler: ghcr.io/yourusername/aurora-btc-scheduler:latest
+  dashboard: ghcr.io/yourusername/aurora-dashboard:latest
+
+gpu:
+  enabled: true
+  limit: 1
+
+mining:
+  coin: "BTC"
+  pool: "stratum+tcp://btc.viabtc.com:3333"
+  wallet: "YOUR_BTC_WALLET_HERE"
+  workerPrefix: "aurora"
+  extraArgs: "--apiport 8080 --intensity 6"
+
+autoscaling:
+  minWorkers: 2
+  maxWorkers: 32

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aurora-mining-config
+data:
+  POOL: "{{ .Values.mining.pool }}"
+  WALLET: "{{ .Values.mining.wallet }}"
+  WORKER_PREFIX: "{{ .Values.mining.workerPrefix }}"
+  EXTRA_ARGS: "{{ .Values.mining.extraArgs }}"
+  COIN: "{{ .Values.mining.coin }}"

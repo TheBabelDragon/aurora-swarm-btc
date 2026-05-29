@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurora-worker
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: aurora-worker
+  template:
+    metadata:
+      labels:
+        app: aurora-worker
+    spec:
+      containers:
+      - name: worker
+        image: "{{ .Values.image.worker }}"
+        envFrom:
+        - configMapRef:
+            name: aurora-mining-config
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: REDIS_URL
+          value: "redis://aurora-redis:6379/0"
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.gpu.limit }}
+          requests:
+            cpu: "4"
+            memory: "8Gi"
+        ports:
+        - containerPort: 8080

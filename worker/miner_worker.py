@@ -1,0 +1,1 @@
+print('Aurora Miner Worker placeholder')
