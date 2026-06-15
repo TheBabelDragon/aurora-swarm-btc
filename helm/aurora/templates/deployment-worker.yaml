@@ -19,6 +19,10 @@ spec:
         - configMapRef:
             name: aurora-mining-config
         env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         - name: REDIS_URL
           value: "redis://aurora-redis:6379/0"
         resources:
@@ -29,3 +33,13 @@ spec:
             memory: "8Gi"
         ports:
         - containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

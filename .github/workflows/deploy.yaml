@@ -1,7 +1,17 @@
-name: Deploy Aurora Swarm
-on: [push]
+name: Deploy to Kubernetes
+
+on:
+  push:
+    branches: [ main ]
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    - name: Build and Push Docker Images
+      run: echo "TODO: Build worker, scheduler, dashboard"
+    - name: Deploy Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: v3.15.0

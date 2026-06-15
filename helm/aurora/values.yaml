@@ -1,9 +1,9 @@
 replicaCount: 2
 
 image:
-  worker: ghcr.io/yourusername/aurora-btc-worker:latest
-  scheduler: ghcr.io/yourusername/aurora-btc-scheduler:latest
-  dashboard: ghcr.io/yourusername/aurora-dashboard:latest
+  worker: ghcr.io/TheBabelDragon/aurora-btc-worker:latest
+  scheduler: ghcr.io/TheBabelDragon/aurora-btc-scheduler:latest
+  dashboard: ghcr.io/TheBabelDragon/aurora-dashboard:latest
 
 gpu:
   enabled: true
