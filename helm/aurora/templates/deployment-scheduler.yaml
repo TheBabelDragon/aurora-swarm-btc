@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurora-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aurora-scheduler
+  template:
+    metadata:
+      labels:
+        app: aurora-scheduler
+    spec:
+      containers:
+      - name: scheduler
+        image: "{{ .Values.image.scheduler }}"
+        envFrom:
+        - configMapRef:
+            name: aurora-mining-config
+        env:
+        - name: REDIS_URL
+          value: "redis://aurora-redis:6379/0"
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+        ports:
+        - containerPort: 8081
