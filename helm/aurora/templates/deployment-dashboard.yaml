@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Deployment
+metadata:
+  name: aurora-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aurora-dashboard
+  template:
+    metadata:
+      labels:
+        app: aurora-dashboard
+    spec:
+      containers:
+      - name: dashboard
+        image: "{{ .Values.image.dashboard }}"
+        env:
+        - name: REDIS_URL
+          value: "redis://aurora-redis:6379/0"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+        ports:
+        - containerPort: 8000
