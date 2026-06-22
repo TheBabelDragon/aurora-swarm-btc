@@ -3,3 +3,4 @@ prometheus-client
 requests
 fastapi
 uvicorn
+psutil
