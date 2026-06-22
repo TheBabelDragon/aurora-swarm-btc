@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurora-worker
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: aurora-worker
+  template:
+    metadata:
+      labels:
+        app: aurora-worker
+    spec:
+      containers:
+      - name: worker
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        tolerations:
+          {{- toYaml .Values.tolerations | nindent 10 }}
+        nodeSelector:
+          {{- toYaml .Values.nodeSelector | nindent 10 }}
+        env:
+          - name: POOL_URL
+            value: {{ .Values.mining.poolUrl }}
+          - name: MINING_WALLET
+            value: {{ .Values.mining.wallet }}
+          - name: WORKER_NAME
+            value: "{{ .Values.mining.workerName }}-{{ .Release.Revision }}"
+          - name: INTENSITY
+            value: {{ .Values.mining.intensity | quote }}

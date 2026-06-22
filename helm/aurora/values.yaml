@@ -1,21 +1,39 @@
-replicaCount: 2
-
-image:
-  worker: ghcr.io/TheBabelDragon/aurora-btc-worker:latest
-  scheduler: ghcr.io/TheBabelDragon/aurora-btc-scheduler:latest
-  dashboard: ghcr.io/TheBabelDragon/aurora-dashboard:latest
-
-gpu:
-  enabled: true
-  limit: 1
+replicaCount: 1
 
 mining:
-  coin: "BTC"
-  pool: "stratum+tcp://btc.viabtc.com:3333"
-  wallet: "YOUR_BTC_WALLET_HERE"
-  workerPrefix: "aurora"
-  extraArgs: "--apiport 8080 --intensity 6"
+  wallet: "bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g"
+  poolUrl: "stratum+tcp://stratum.braiins.com:3333"
+  workerName: "aurora-gpu"
+  intensity: "19"
+  gpusPerPod: 1
 
-autoscaling:
-  minWorkers: 2
-  maxWorkers: 32
+image:
+  repository: yourusername/aurora-worker
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    nvidia.com/gpu: "{{ .Values.mining.gpusPerPod }}"   # Dynamic
+  requests:
+    cpu: "1000m"
+    memory: "2Gi"
+    nvidia.com/gpu: "{{ .Values.mining.gpusPerPod }}"
+
+tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+nodeSelector:
+  accelerator: nvidia
+
+prometheus:
+  enabled: true
+  port: 8000
+
+hpa:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 16
+  targetCPUUtilizationPercentage: 70
