@@ -9,14 +9,9 @@ import prometheus_client as prom
 from control.bus import Bus
 
 """
-Aurora Swarm BTC - Production Miner Worker v2
+Aurora Swarm BTC - Production Miner Worker
 
-Features:
-- Runs bfgminer with configurable GPUs
-- Reports hashrate, shares, and status to Redis bus
-- Exposes Prometheus metrics
-- Graceful shutdown and auto-restart
-- Health reporting
+Robust worker that runs bfgminer, reports metrics, and maintains health status.
 """
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -27,9 +22,9 @@ bus = Bus()
 HASH_RATE = prom.Gauge('aurora_worker_hashrate_ghs', 'Current hashrate GH/s')
 SHARES_ACCEPTED = prom.Counter('aurora_shares_accepted_total', 'Accepted shares')
 WORKER_STATUS = prom.Gauge('aurora_worker_status', 'Worker status')
-HEALTH = prom.Gauge('aurora_worker_health', '1 = healthy, 0 = unhealthy')
+HEALTH = prom.Gauge('aurora_worker_health', 'Health status')
 
-# Config from environment
+# Config
 GPUS_PER_POD = int(os.getenv("GPUS_PER_POD", "1"))
 WALLET = os.getenv("MINING_WALLET", "bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g")
 POOL_URL = os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333")
@@ -66,7 +61,7 @@ def start_miner():
     if GPUS_PER_POD > 1:
         cmd.extend(["--set", f"gpu_count={GPUS_PER_POD}"])
 
-    logger.info(f"Starting bfgminer with {GPUS_PER_POD} GPU(s)...")
+    logger.info(f"Starting bfgminer ({GPUS_PER_POD} GPU(s))...")
     try:
         miner_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         WORKER_STATUS.set(1)
@@ -108,6 +103,8 @@ def main():
     prom.start_http_server(8000)
     logger.info(f"Aurora Miner Worker started ({GPUS_PER_POD} GPU(s))")
 
+    last_health_report = time.time()
+
     while True:
         try:
             process = start_miner()
@@ -127,6 +124,11 @@ def main():
                     SHARES_ACCEPTED.inc()
                     bus.increment("cluster:shares_accepted", 1)
                     logger.info("Share accepted")
+
+                # Periodic health report
+                if time.time() - last_health_report > 30:
+                    bus.set("worker:health", 1 if healthy else 0)
+                    last_health_report = time.time()
 
             logger.warning("Miner exited. Restarting in 10s...")
             WORKER_STATUS.set(0)
