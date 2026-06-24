@@ -11,12 +11,8 @@ from control.bus import Bus
 """
 Aurora Swarm BTC - Production Miner Worker
 
-Responsibilities:
-- Run bfgminer on GPU(s)
-- Report hashrate and shares to Redis bus
-- Expose Prometheus metrics
-- Handle restarts and graceful shutdown
-- Integrate with sensing-driven policies
+This worker runs bfgminer and reports metrics + status to the control bus.
+It is designed to be resilient and observable.
 """
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -24,11 +20,11 @@ logger = logging.getLogger("aurora-worker")
 bus = Bus()
 
 # Prometheus Metrics
-HASH_RATE = prom.Gauge('aurora_worker_hashrate_ghs', 'Current hashrate in GH/s')
-SHARES_ACCEPTED = prom.Counter('aurora_shares_accepted_total', 'Total accepted shares')
-WORKER_STATUS = prom.Gauge('aurora_worker_status', '1 = mining, 0 = stopped')
+HASH_RATE = prom.Gauge('aurora_worker_hashrate_ghs', 'Current hashrate GH/s')
+SHARES_ACCEPTED = prom.Counter('aurora_shares_accepted_total', 'Accepted shares')
+WORKER_STATUS = prom.Gauge('aurora_worker_status', '1 = running, 0 = stopped')
 
-# Configuration from environment
+# Config
 GPUS_PER_POD = int(os.getenv("GPUS_PER_POD", "1"))
 WALLET = os.getenv("MINING_WALLET", "bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g")
 POOL_URL = os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333")
@@ -39,7 +35,6 @@ miner_process = None
 
 
 def parse_hashrate(line: str) -> float:
-    """Extract hashrate from bfgminer output line."""
     match = re.search(r'(\d+\.?\d*)\s*(KH|MH|GH|TH)/s', line, re.IGNORECASE)
     if match:
         rate = float(match.group(1))
@@ -74,11 +69,12 @@ def start_miner():
 def stop_miner():
     global miner_process
     if miner_process and miner_process.poll() is None:
-        logger.info("Terminating miner...")
+        logger.info("Stopping miner gracefully...")
         miner_process.terminate()
         try:
-            miner_process.wait(timeout=8)
+            miner_process.wait(timeout=10)
         except subprocess.TimeoutExpired:
+            logger.warning("Miner did not stop in time, killing...")
             miner_process.kill()
         WORKER_STATUS.set(0)
         miner_process = None
@@ -95,11 +91,12 @@ def main():
     signal.signal(signal.SIGTERM, shutdown_handler)
 
     prom.start_http_server(8000)
-    logger.info(f"Aurora Worker started - {GPUS_PER_POD} GPU(s)")
+    logger.info(f"Aurora Miner Worker started ({GPUS_PER_POD} GPU(s))")
 
     while True:
         try:
             process = start_miner()
+
             for line in process.stdout:
                 hashrate = parse_hashrate(line)
                 if hashrate > 0:
@@ -113,12 +110,12 @@ def main():
                     bus.increment("cluster:shares_accepted", 1)
                     logger.info("Share accepted")
 
-            logger.warning("Miner exited. Restarting in 10 seconds...")
+            logger.warning("Miner process ended unexpectedly. Restarting in 10s...")
             WORKER_STATUS.set(0)
             time.sleep(10)
 
         except Exception as e:
-            logger.error(f"Worker error: {e}")
+            logger.error(f"Critical worker error: {e}")
             WORKER_STATUS.set(0)
             time.sleep(15)
 
