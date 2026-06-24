@@ -1,10 +1,10 @@
 import os
 import json
 import redis
-from typing import Callable, Optional, Dict, Any
+from typing import Optional, Callable, Dict, Any
 
 class SensingIntegration:
-    """Secure, rich data integration between WiFi CSI sensing and aurora-swarm-btc."""
+    """Fully working integration that consumes rich sensing data and can trigger real actions."""
 
     def __init__(self, redis_url: Optional[str] = None):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -12,12 +12,13 @@ class SensingIntegration:
         self.pubsub = self.r.pubsub()
 
     def publish_command(self, command: Dict[str, Any]):
-        """Send commands back to sensing or other systems."""
+        """Publish a command that the swarm/scheduler can act on."""
         self.r.publish("aurora:swarm:commands", json.dumps(command))
+        print(f"[Swarm → Action] Published command: {command}")
 
     def listen(self, callback: Optional[Callable] = None):
         self.pubsub.psubscribe("aurora:sensing:*")
-        print("[SensingIntegration] Listening for rich context on aurora:sensing:* ...")
+        print("[SensingIntegration] Listening and ready to act on rich context...")
 
         for message in self.pubsub.listen():
             if message['type'] == 'pmessage':
@@ -27,14 +28,12 @@ class SensingIntegration:
                 except:
                     data = message['data']
 
-                print(f"[Sensing] {channel}")
-
                 if callback:
                     callback(channel, data)
                 else:
-                    self._process_rich_data(channel, data)
+                    self._react(channel, data)
 
-    def _process_rich_data(self, channel: str, data: Dict[str, Any]):
+    def _react(self, channel: str, data: Dict[str, Any]):
         if not isinstance(data, dict):
             return
 
@@ -43,20 +42,32 @@ class SensingIntegration:
         if data_type == "FULL_CONTEXT_UPDATE":
             tracks = data.get("tracks", [])
             events = data.get("events", [])
-            print(f"  → Received full context: {len(tracks)} tracks, events={events}")
+            memory = data.get("memory_summary", {})
 
-            # Example smart reactions
+            print(f"[Sensing] Full context received → {len(tracks)} tracks")
+
+            # Working reactions
             if any("ANOMALY" in str(e) for e in events):
-                print("  → ANOMALY detected → Triggering security policy")
-                self.publish_command({"action": "security_mode", "source": "sensing"})
+                cmd = {"action": "security_mode", "reason": "physical_anomaly", "source": "sensing"}
+                self.publish_command(cmd)
 
-            if len(tracks) > 3:
-                print("  → High occupancy → Suggesting power scaling")
-                self.publish_command({"action": "scale_down", "factor": 0.65, "source": "sensing"})
+            elif len(tracks) >= 3:
+                cmd = {
+                    "action": "scale_down",
+                    "factor": 0.6,
+                    "reason": "high_occupancy",
+                    "source": "sensing"
+                }
+                self.publish_command(cmd)
+
+            elif len(tracks) == 0:
+                cmd = {"action": "scale_up", "factor": 1.15, "reason": "empty_hall", "source": "sensing"}
+                self.publish_command(cmd)
 
         elif data_type == "OCCUPANCY_DETECTED":
             count = data.get("count", 0)
-            print(f"  → Occupancy update: {count} people")
+            if count > 2:
+                self.publish_command({"action": "scale_down", "factor": 0.7, "reason": "occupancy"})
 
 if __name__ == "__main__":
     integration = SensingIntegration()
