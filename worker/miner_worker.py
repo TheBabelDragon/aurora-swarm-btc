@@ -9,22 +9,27 @@ import prometheus_client as prom
 from control.bus import Bus
 
 """
-Aurora Swarm BTC - Production Miner Worker
+Aurora Swarm BTC - Production Miner Worker v2
 
-This worker runs bfgminer and reports metrics + status to the control bus.
-It is designed to be resilient and observable.
+Features:
+- Runs bfgminer with configurable GPUs
+- Reports hashrate, shares, and status to Redis bus
+- Exposes Prometheus metrics
+- Graceful shutdown and auto-restart
+- Health reporting
 """
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("aurora-worker")
 bus = Bus()
 
-# Prometheus Metrics
+# Prometheus
 HASH_RATE = prom.Gauge('aurora_worker_hashrate_ghs', 'Current hashrate GH/s')
 SHARES_ACCEPTED = prom.Counter('aurora_shares_accepted_total', 'Accepted shares')
-WORKER_STATUS = prom.Gauge('aurora_worker_status', '1 = running, 0 = stopped')
+WORKER_STATUS = prom.Gauge('aurora_worker_status', 'Worker status')
+HEALTH = prom.Gauge('aurora_worker_health', '1 = healthy, 0 = unhealthy')
 
-# Config
+# Config from environment
 GPUS_PER_POD = int(os.getenv("GPUS_PER_POD", "1"))
 WALLET = os.getenv("MINING_WALLET", "bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g")
 POOL_URL = os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333")
@@ -32,6 +37,7 @@ WORKER_NAME = os.getenv("WORKER_NAME", "aurora-gpu1")
 INTENSITY = os.getenv("INTENSITY", "19")
 
 miner_process = None
+healthy = True
 
 
 def parse_hashrate(line: str) -> float:
@@ -45,7 +51,7 @@ def parse_hashrate(line: str) -> float:
 
 
 def start_miner():
-    global miner_process
+    global miner_process, healthy
     cmd = [
         "bfgminer",
         "-o", POOL_URL,
@@ -60,23 +66,32 @@ def start_miner():
     if GPUS_PER_POD > 1:
         cmd.extend(["--set", f"gpu_count={GPUS_PER_POD}"])
 
-    logger.info(f"Starting bfgminer ({GPUS_PER_POD} GPU(s))...")
-    miner_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    WORKER_STATUS.set(1)
-    return miner_process
+    logger.info(f"Starting bfgminer with {GPUS_PER_POD} GPU(s)...")
+    try:
+        miner_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        WORKER_STATUS.set(1)
+        HEALTH.set(1)
+        healthy = True
+        return miner_process
+    except Exception as e:
+        logger.error(f"Failed to start miner: {e}")
+        HEALTH.set(0)
+        healthy = False
+        return None
 
 
 def stop_miner():
-    global miner_process
+    global miner_process, healthy
     if miner_process and miner_process.poll() is None:
-        logger.info("Stopping miner gracefully...")
+        logger.info("Stopping miner...")
         miner_process.terminate()
         try:
             miner_process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            logger.warning("Miner did not stop in time, killing...")
             miner_process.kill()
         WORKER_STATUS.set(0)
+        HEALTH.set(0)
+        healthy = False
         miner_process = None
 
 
@@ -96,6 +111,9 @@ def main():
     while True:
         try:
             process = start_miner()
+            if process is None:
+                time.sleep(15)
+                continue
 
             for line in process.stdout:
                 hashrate = parse_hashrate(line)
@@ -110,13 +128,16 @@ def main():
                     bus.increment("cluster:shares_accepted", 1)
                     logger.info("Share accepted")
 
-            logger.warning("Miner process ended unexpectedly. Restarting in 10s...")
+            logger.warning("Miner exited. Restarting in 10s...")
             WORKER_STATUS.set(0)
+            HEALTH.set(0)
+            healthy = False
             time.sleep(10)
 
         except Exception as e:
-            logger.error(f"Critical worker error: {e}")
-            WORKER_STATUS.set(0)
+            logger.error(f"Worker error: {e}")
+            HEALTH.set(0)
+            healthy = False
             time.sleep(15)
 
 
