@@ -2,16 +2,15 @@
 
 **They yearn for the mines.**
 
-Resilient, observable integration with the WiFi CSI sensing system.
+Now with **bidirectional** integration to the WiFi CSI sensing system.
 
-## Key Features
+## Bidirectional Control (Early Stage)
 
-- Rich structured context sharing
-- Heartbeat monitoring + stale data detection
-- Explicit integration health status (`get_health_status()`)
-- Working PolicyEngine that generates real actions
-- Graceful degradation when sensing is unavailable
+The swarm can now send commands back to the sensing system via Redis.
+
+**Important Disclaimer:**
+This command channel is currently unauthenticated and should only be used in trusted environments. Future versions will include proper security.
 
 See `sensing/integration.py` and `sensing/policy_engine.py`.
 
-**They do yearn. Now they have eyes and can stay aware even when things get noisy.**
+**They do yearn. Now they have eyes, a brain, *and* a voice.**
