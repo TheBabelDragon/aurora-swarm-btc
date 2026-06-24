@@ -12,7 +12,7 @@ except ImportError:
     HAS_METRICS = False
 
 class SensingIntegration:
-    """Resilient + bidirectional integration with health reporting."""
+    """Resilient bidirectional integration with demo-friendly command sending."""
 
     def __init__(self, redis_url: Optional[str] = None, stale_threshold: int = 30):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -23,6 +23,7 @@ class SensingIntegration:
         self.last_heartbeat = 0
         self.integration_healthy = False
         self.last_context_update = 0
+        self._demo_command_counter = 0
 
         if HAS_METRICS:
             self.metrics = get_metrics()
@@ -46,7 +47,7 @@ class SensingIntegration:
 
     def send_command_to_sensing(self, command: dict):
         self.r.publish("aurora:swarm:commands", json.dumps(command))
-        print(f"[Swarm → Sensing] Sent command: {command}")
+        print(f"[Swarm → Sensing] Command sent: {command.get('action', command.get('type', 'unknown'))}")
 
     def publish_command(self, command):
         self.send_command_to_sensing(command)
@@ -69,7 +70,7 @@ class SensingIntegration:
 
     def listen(self):
         self.pubsub.psubscribe("aurora:sensing:*")
-        print("[SensingIntegration] Listening with health metrics...")
+        print("[SensingIntegration] Listening with bidirectional support...")
 
         last_check = time.time()
 
@@ -86,6 +87,12 @@ class SensingIntegration:
                 actions = self.policy_engine.evaluate(data)
                 for action in actions:
                     self.send_command_to_sensing(action)
+
+            # Occasionally send a demo command back to sensing (for visibility)
+            self._demo_command_counter += 1
+            if self._demo_command_counter % 25 == 0:
+                demo_cmd = {"action": "scale_down", "factor": 0.75, "reason": "demo_heartbeat"}
+                self.send_command_to_sensing(demo_cmd)
 
             if time.time() - last_check > 10:
                 healthy = self.check_heartbeat()
