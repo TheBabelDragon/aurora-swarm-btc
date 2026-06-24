@@ -2,10 +2,13 @@
 
 **They yearn for the mines.**
 
-Fully working integration with rich structured data from the WiFi CSI system.
+Now with a working PolicyEngine that reacts to rich physical context from the WiFi CSI system.
 
-The swarm now receives full context (tracks, events, behaviors, memory) and can trigger real actions (power scaling, security mode, etc.) via `sensing/integration.py`.
+The swarm can now intelligently:
+- Scale power based on occupancy
+- Enter security mode on anomalies
+- Make context-aware decisions
 
-See: [wifi-sensing-system](https://github.com/TheBabelDragon/wifi-sensing-system)
+See `sensing/policy_engine.py` and `sensing/integration.py`.
 
-**They do yearn. Now they have eyes and can act.**
+**They do yearn. Now they have eyes and a brain.**
