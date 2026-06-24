@@ -2,13 +2,15 @@
 
 **They yearn for the mines.**
 
-Now with a working PolicyEngine that reacts to rich physical context from the WiFi CSI system.
+Now with resilient integration to the WiFi CSI sensing system.
 
-The swarm can now intelligently:
-- Scale power based on occupancy
-- Enter security mode on anomalies
-- Make context-aware decisions
+## Resilience Features
 
-See `sensing/policy_engine.py` and `sensing/integration.py`.
+- Heartbeat monitoring from sensing system
+- Stale data detection (graceful degradation when sensing stops)
+- Working PolicyEngine that generates real actions
+- Clear logging of integration health
 
-**They do yearn. Now they have eyes and a brain.**
+See `sensing/integration.py` and `sensing/policy_engine.py`.
+
+**They do yearn. Now they have eyes *and* situational awareness.**
