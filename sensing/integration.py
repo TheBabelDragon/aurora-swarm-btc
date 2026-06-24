@@ -5,8 +5,14 @@ import time
 from typing import Optional
 from .policy_engine import PolicyEngine
 
+try:
+    from observability.metrics import get_metrics
+    HAS_METRICS = True
+except ImportError:
+    HAS_METRICS = False
+
 class SensingIntegration:
-    """Resilient + bidirectional integration. Can now send commands back to sensing."""
+    """Resilient + bidirectional integration with health reporting."""
 
     def __init__(self, redis_url: Optional[str] = None, stale_threshold: int = 30):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -16,16 +22,29 @@ class SensingIntegration:
         self.stale_threshold = stale_threshold
         self.last_heartbeat = 0
         self.integration_healthy = False
+        self.last_context_update = 0
+
+        if HAS_METRICS:
+            self.metrics = get_metrics()
 
     def get_health_status(self):
         return {
             "healthy": self.integration_healthy,
             "last_heartbeat_age": time.time() - self.last_heartbeat if self.last_heartbeat else None,
+            "last_context_age": time.time() - self.last_context_update if self.last_context_update else None,
             "threshold_seconds": self.stale_threshold
         }
 
+    def _report_health_metrics(self):
+        if HAS_METRICS:
+            status = self.get_health_status()
+            self.metrics.update_integration_health(
+                healthy=status["healthy"],
+                heartbeat_age=status.get("last_heartbeat_age"),
+                context_age=status.get("last_context_age")
+            )
+
     def send_command_to_sensing(self, command: dict):
-        """Send a structured command back to the sensing system."""
         self.r.publish("aurora:swarm:commands", json.dumps(command))
         print(f"[Swarm → Sensing] Sent command: {command}")
 
@@ -40,15 +59,17 @@ class SensingIntegration:
                 self.last_heartbeat = data.get("timestamp", 0)
                 age = time.time() - self.last_heartbeat
                 self.integration_healthy = age < self.stale_threshold
+                self._report_health_metrics()
                 return self.integration_healthy
         except Exception:
             pass
         self.integration_healthy = False
+        self._report_health_metrics()
         return False
 
     def listen(self):
         self.pubsub.psubscribe("aurora:sensing:*")
-        print("[SensingIntegration] Listening with bidirectional support...")
+        print("[SensingIntegration] Listening with health metrics...")
 
         last_check = time.time()
 
@@ -58,6 +79,9 @@ class SensingIntegration:
                     data = json.loads(message['data'])
                 except:
                     data = message['data']
+
+                if data.get("type") == "FULL_CONTEXT_UPDATE":
+                    self.last_context_update = time.time()
 
                 actions = self.policy_engine.evaluate(data)
                 for action in actions:
