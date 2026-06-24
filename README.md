@@ -4,15 +4,13 @@
 
 Production-ready entropy-driven Bitcoin mining swarm with Kubernetes + Helm.
 
-## Now With Spatial Intelligence
+## Now With Physical Spatial Awareness
 
-This swarm is now integrated with the **WiFi CSI Spatial Intelligence System**.
+This swarm is tightly integrated with the **WiFi CSI Spatial Intelligence System**.
 
-The physical mining hall has "eyes and ears" via WiFi sensing:
-- Real-time occupancy & behavior detection
-- Anomaly alerts near rigs
-- Thermal/occupancy context pushed into the control bus
-- Agent-driven decisions that can scale or pause mining based on human presence
+- Receives real-time occupancy, behavior, and anomaly events from ESP32 CSI nodes
+- Can react to physical presence (power scaling, security alerts, etc.)
+- Uses `sensing/integration.py` to listen on the Redis control bus
 
 See: [wifi-sensing-system](https://github.com/TheBabelDragon/wifi-sensing-system)
 
@@ -28,15 +26,12 @@ helm upgrade --install aurora ./helm/aurora \
 kubectl port-forward svc/aurora-dashboard 8000:8000
 ```
 
-Open: http://localhost:8000/status
-
 ## Features
 - GPU-accelerated workers
-- Redis control bus (now receives sensing events)
+- Redis control bus with sensing event support
 - Intelligent scheduler
-- Auto-scaling HPA
+- Auto-scaling
 - Real-time dashboard
-- CI/CD with GitHub Actions
-- **Physical context awareness** via WiFi CSI
+- Physical context awareness via WiFi CSI
 
-**They do yearn.** Now they also know who’s watching. 🚀
+**They do yearn. Now they can see who's near them.**
