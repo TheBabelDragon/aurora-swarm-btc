@@ -2,24 +2,24 @@
 
 **They yearn for the mines.**
 
-Now with resilient integration to the WiFi CSI sensing system **and** an external API.
+Now with resilient sensing integration **and** a powerful external API.
 
 ## External API
 
-The swarm now exposes a clean, versioned REST API so external systems can plug in.
+The swarm exposes a clean, versioned REST + WebSocket API so external systems can integrate easily.
 
-- Location: `api/main.py`
-- Documentation: http://localhost:8001/docs (when running)
-- Authentication: `X-API-Key` header
+- Run with: `uvicorn api.main:app --port 8001`
+- Docs: `http://localhost:8001/docs`
+- Real-time events via WebSocket at `/ws/events`
+- Commands are published to the Redis bus
 
-See `api/README.md` for details.
+See `api/README.md` for full details.
 
 ## Key Features
 
-- Rich structured context sharing with sensing system
-- Heartbeat monitoring + stale data detection
-- Explicit integration health status
-- Working PolicyEngine
-- External API for third-party integration
+- Rich context sharing with WiFi CSI sensing system
+- Heartbeat monitoring + graceful degradation
+- External API with WebSocket support
+- Working PolicyEngine + command routing
 
-**They do yearn. Now they have eyes, situational awareness, *and* an API.**
+**They do yearn. Now they have eyes, a brain, a voice, *and* an API.**
