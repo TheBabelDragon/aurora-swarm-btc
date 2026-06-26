@@ -2,15 +2,24 @@
 
 **They yearn for the mines.**
 
-Now with **bidirectional** integration to the WiFi CSI sensing system.
+Now with resilient integration to the WiFi CSI sensing system **and** an external API.
 
-## Bidirectional Control (Early Stage)
+## External API
 
-The swarm can now send commands back to the sensing system via Redis.
+The swarm now exposes a clean, versioned REST API so external systems can plug in.
 
-**Important Disclaimer:**
-This command channel is currently unauthenticated and should only be used in trusted environments. Future versions will include proper security.
+- Location: `api/main.py`
+- Documentation: http://localhost:8001/docs (when running)
+- Authentication: `X-API-Key` header
 
-See `sensing/integration.py` and `sensing/policy_engine.py`.
+See `api/README.md` for details.
 
-**They do yearn. Now they have eyes, a brain, *and* a voice.**
+## Key Features
+
+- Rich structured context sharing with sensing system
+- Heartbeat monitoring + stale data detection
+- Explicit integration health status
+- Working PolicyEngine
+- External API for third-party integration
+
+**They do yearn. Now they have eyes, situational awareness, *and* an API.**
