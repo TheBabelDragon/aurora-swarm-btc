@@ -1,20 +1,24 @@
 """
-Aurora Swarm BTC - External API (v1)
+Aurora Swarm BTC - External API v1
 
-This is the recommended way for external systems to interact with the swarm.
+Smart, future-proof external API for the mining swarm.
 
-Design goals:
-- Clean, versioned REST API
-- Good documentation (auto-generated)
-- Secure by default (API key auth scaffolding)
-- Easy to extend
-- Works alongside existing Redis bus and Prometheus
+Features:
+- Versioned REST API (/api/v1)
+- Automatic OpenAPI documentation
+- API Key authentication (easy to upgrade to JWT)
+- WebSocket support for real-time events
+- Clean router structure
+- Designed to integrate with Redis bus + Prometheus
 """
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.security import APIKeyHeader
+from typing import List
 
-from .routers import status, commands, metrics
+import os
+
+from .routers import status, commands, metrics, workers, events
 
 app = FastAPI(
     title="Aurora Swarm BTC API",
@@ -24,8 +28,8 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Simple API Key authentication (can be upgraded to JWT later)
-API_KEY = "aurora-swarm-secret-key-change-me"  # TODO: Move to env/config
+# API Key authentication
+API_KEY = os.getenv("AURORA_API_KEY", "aurora-swarm-secret-key-change-me")
 api_key_header = APIKeyHeader(name="X-API-Key")
 
 def verify_api_key(api_key: str = Depends(api_key_header)):
@@ -36,11 +40,37 @@ def verify_api_key(api_key: str = Depends(api_key_header)):
         )
     return api_key
 
+# Public health check (no auth)
+@app.get("/health", tags=["System"])
+async def health_check():
+    return {"status": "ok", "service": "aurora-swarm-api"}
+
 # Include routers
 app.include_router(status.router, prefix="/api/v1/status", tags=["Status"], dependencies=[Depends(verify_api_key)])
 app.include_router(commands.router, prefix="/api/v1/commands", tags=["Commands"], dependencies=[Depends(verify_api_key)])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["Metrics"], dependencies=[Depends(verify_api_key)])
+app.include_router(workers.router, prefix="/api/v1/workers", tags=["Workers"], dependencies=[Depends(verify_api_key)])
+app.include_router(events.router, prefix="/api/v1/events", tags=["Events"], dependencies=[Depends(verify_api_key)])
+
+# WebSocket for real-time events (authenticated)
+active_connections: List[WebSocket] = []
+
+@app.websocket("/ws/events")
+async def websocket_events(websocket: WebSocket):
+    await websocket.accept()
+    active_connections.append(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Echo or handle client messages if needed
+            await websocket.send_text(f"Message received: {data}")
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
 
 @app.get("/", include_in_schema=False)
 def root():
-    return {"message": "Aurora Swarm BTC API is running. See /docs for documentation."}
+    return {
+        "message": "Aurora Swarm BTC API is running.",
+        "docs": "/docs",
+        "health": "/health"
+    }
