@@ -1,41 +1,50 @@
 # Aurora Swarm BTC - External API
 
-This folder contains a clean, versioned REST API that allows external systems to interact with the swarm.
+Clean, versioned, and extensible REST + WebSocket API for external integration.
 
-## Why this approach?
+## Features
 
-- Modern (FastAPI + automatic OpenAPI docs)
-- Versioned (`/api/v1/`)
-- Secure by default (API Key auth, easy to upgrade to JWT)
+- Versioned under `/api/v1/`
+- Automatic OpenAPI documentation (`/docs`)
+- API Key authentication
+- WebSocket endpoint for real-time events (`/ws/events`)
+- Public health check endpoint
 - Easy to extend with new routers
-- Works alongside existing Redis bus and Prometheus
 
-## Running the API
+## Running
 
 ```bash
 uvicorn api.main:app --reload --port 8001
 ```
 
-Then visit:
-- http://localhost:8001/docs (Swagger UI)
-- http://localhost:8001/redoc
-
 ## Authentication
 
-All endpoints require the `X-API-Key` header.
-
-Default key (change in production):
-`aurora-swarm-secret-key-change-me`
+All protected endpoints require the header:
+`X-API-Key: your-key-here`
 
 ## Current Endpoints (v1)
 
-- `GET /api/v1/status/` - Swarm status
-- `POST /api/v1/commands/` - Send commands to the swarm
-- `GET /api/v1/metrics/` - Metrics summary
+### Status
+- `GET /api/v1/status/`
 
-## Future Improvements
+### Commands
+- `POST /api/v1/commands/`
 
-- WebSocket support for real-time events
-- Better integration with Redis bus
-- Role-based access control
+### Metrics
+- `GET /api/v1/metrics/`
+
+### Workers
+- `GET /api/v1/workers/`
+
+### Events
+- `GET /api/v1/events/`
+
+### Real-time
+- WebSocket: `ws://localhost:8001/ws/events`
+
+## Future Roadmap
+
+- Better Redis integration for live data
 - Rate limiting
+- Role-based access
+- More granular command validation
