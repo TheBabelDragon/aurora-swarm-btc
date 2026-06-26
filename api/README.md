@@ -1,50 +1,26 @@
-# Aurora Swarm BTC - External API
+# Aurora Swarm BTC - External API (Near Full Connection)
 
-Clean, versioned, and extensible REST + WebSocket API for external integration.
+This API is now substantially wired into the swarm.
 
-## Features
+## Key Capabilities
 
-- Versioned under `/api/v1/`
-- Automatic OpenAPI documentation (`/docs`)
-- API Key authentication
-- WebSocket endpoint for real-time events (`/ws/events`)
-- Public health check endpoint
-- Easy to extend with new routers
+- Send real commands that are published to the Redis bus
+- Get reasonably live status and metrics
+- WebSocket endpoint that receives events when commands are sent
+- Clean structure ready for further expansion
 
 ## Running
 
 ```bash
-uvicorn api.main:app --reload --port 8001
+uvicorn api.main:app --port 8001
 ```
 
-## Authentication
+Visit `http://localhost:8001/docs` for interactive documentation.
 
-All protected endpoints require the header:
-`X-API-Key: your-key-here`
+## Notable Endpoints
 
-## Current Endpoints (v1)
-
-### Status
-- `GET /api/v1/status/`
-
-### Commands
-- `POST /api/v1/commands/`
-
-### Metrics
-- `GET /api/v1/metrics/`
-
-### Workers
-- `GET /api/v1/workers/`
-
-### Events
-- `GET /api/v1/events/`
-
-### Real-time
+- `POST /api/v1/commands/` → Publishes to Redis + broadcasts via WebSocket
+- `GET /api/v1/status/`, `/metrics/`, `/workers/`, `/events/`
 - WebSocket: `ws://localhost:8001/ws/events`
 
-## Future Roadmap
-
-- Better Redis integration for live data
-- Rate limiting
-- Role-based access
-- More granular command validation
+The API is now meaningfully connected to the swarm's internal systems.
