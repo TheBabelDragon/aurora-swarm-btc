@@ -27,13 +27,17 @@ class CommsLayer:
     Builds on Redis pub/sub + key-value store to provide:
     - Structured message publishing
     - Topic/pattern subscription with handlers
-    - Swarm node registration & discovery (with heartbeats)
+    - Swarm node registration & discovery (heartbeats, active nodes)
     - Convenience methods for common Aurora flows (events, commands, sensing, telemetry)
+    - Event history for UI / replay
     - Basic resilience and logging
 
     This centralizes communication logic so workers, scheduler, sensing, and API
     can interact cleanly without duplicating Redis code.
     """
+
+    EVENT_HISTORY_KEY = "events:history"
+    MAX_EVENTS = 100
 
     def __init__(self, redis_url: Optional[str] = None, node_id: Optional[str] = None):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -57,8 +61,10 @@ class CommsLayer:
         logger.debug(f"Published to {prefixed}")
 
     def publish_message(self, channel: str, msg: SwarmMessage):
-        """Publish a typed SwarmMessage."""
+        """Publish a typed SwarmMessage and log to history if it's an event."""
         self.publish(channel, msg)
+        if msg.type.startswith("event.") or msg.type == "event":
+            self._log_event_to_history(msg)
 
     def set_state(self, key: str, value: Any, expire: int = 0):
         """Set shared state (prefixed)."""
@@ -77,6 +83,23 @@ class CommsLayer:
         except Exception:
             return val
 
+    def _log_event_to_history(self, msg: SwarmMessage):
+        """Store recent events for UI / debugging (capped list)."""
+        try:
+            event_data = msg.model_dump()
+            self.r.lpush(f"aurora:{self.EVENT_HISTORY_KEY}", json.dumps(event_data))
+            self.r.ltrim(f"aurora:{self.EVENT_HISTORY_KEY}", 0, self.MAX_EVENTS - 1)
+        except Exception as e:
+            logger.warning(f"Failed to log event to history: {e}")
+
+    def get_recent_events(self, limit: int = 20) -> List[Dict]:
+        """Retrieve recent events for UI and routers (newest first)."""
+        try:
+            raw_events = self.r.lrange(f"aurora:{self.EVENT_HISTORY_KEY}", 0, limit - 1) or []
+            return [json.loads(e) for e in raw_events]
+        except Exception:
+            return []
+
     # --- Node Registry (for swarm discovery) ---
 
     def register_node(self, node_id: Optional[str] = None, node_type: str = "worker", metadata: Optional[Dict] = None, ttl: int = 60):
@@ -89,7 +112,6 @@ class CommsLayer:
             "metadata": metadata or {}
         }
         self.set_state(f"nodes:{nid}", data, expire=ttl)
-        # Also add to type set for easy discovery
         self.r.sadd(f"aurora:nodes:{node_type}", nid)
         self.r.expire(f"aurora:nodes:{node_type}", ttl * 2)
         logger.info(f"Registered node {nid} (type={node_type})")
@@ -97,16 +119,15 @@ class CommsLayer:
     def heartbeat(self, node_id: Optional[str] = None):
         """Refresh heartbeat for a node."""
         nid = node_id or self.node_id
-        self.register_node(nid)  # re-sets with fresh TTL
+        self.register_node(nid)
 
     def get_active_nodes(self, node_type: Optional[str] = None) -> List[Dict]:
-        """Discover currently active nodes."""
+        """Discover currently active nodes (from registry)."""
         if node_type:
             node_ids = self.r.smembers(f"aurora:nodes:{node_type}") or []
         else:
-            # Fallback: scan keys (simplified)
             keys = self.r.keys("aurora:nodes:*")
-            node_ids = [k.split(":")[-1] for k in keys if k.startswith("aurora:nodes:")]
+            node_ids = [k.split(":")[-1] for k in keys if ":nodes:" in k and not k.endswith(":nodes:")]
 
         nodes = []
         for nid in node_ids:
@@ -115,17 +136,21 @@ class CommsLayer:
                 nodes.append(data)
         return nodes
 
+    def get_workers(self) -> List[Dict]:
+        """Convenience: get all active worker nodes."""
+        return self.get_active_nodes(node_type="worker")
+
     # --- High-level Aurora-specific methods ---
 
     def publish_event(self, event_type: str, data: Dict[str, Any], source: Optional[str] = None):
-        """Publish a swarm event (e.g. worker_joined, mining_started, context_updated)."""
+        """Publish a swarm event and store in history."""
         msg = SwarmMessage(
             type=f"event.{event_type}",
             payload=data,
             source=source or self.node_id
         )
         self.publish_message("events", msg)
-        # Also broadcast via legacy channel for compatibility
+        # Legacy compatibility
         self.publish("events", {"type": event_type, "data": data, "source": source or self.node_id})
 
     def publish_telemetry(self, metrics: Dict[str, Any], source: Optional[str] = None):
@@ -149,7 +174,6 @@ class CommsLayer:
             self.publish_message(f"commands:{target}", cmd)
         else:
             self.publish_message("commands", cmd)
-            # Legacy compatibility
             self.publish("swarm:commands", {"action": action, **(payload or {})})
 
     def send_sensing_command(self, action: str, **kwargs):
@@ -159,15 +183,14 @@ class CommsLayer:
     # --- Subscription handling ---
 
     def subscribe(self, pattern: str, handler: Callable[[SwarmMessage], None]):
-        """Register a handler for messages matching the pattern (e.g. 'events.*' or 'sensing:*').
-        Note: Actual listening loop must be started separately (see start_listener)."""
+        """Register a handler for messages matching the pattern."""
         if pattern not in self.handlers:
             self.handlers[pattern] = []
         self.handlers[pattern].append(handler)
         logger.info(f"Subscribed handler to pattern: {pattern}")
 
     def start_listener(self, patterns: Optional[List[str]] = None):
-        """Start listening loop for registered patterns. Runs blocking; use in thread or dedicated process."""
+        """Start listening loop for registered patterns. Blocking; run in thread."""
         patterns = patterns or list(self.handlers.keys()) or ["aurora:events", "aurora:commands", "aurora:sensing:*"]
         for p in patterns:
             if p not in self._subscribed_patterns:
@@ -188,7 +211,6 @@ class CommsLayer:
                     else:
                         data = raw
 
-                    # Try to parse as SwarmMessage
                     if isinstance(data, dict) and "type" in data:
                         try:
                             msg = SwarmMessage(**data)
@@ -197,21 +219,13 @@ class CommsLayer:
                     else:
                         msg = SwarmMessage(type="raw", payload={"raw": data})
 
-                    # Dispatch to matching handlers
                     for pat, handlers in self.handlers.items():
-                        # Simple pattern match (extend with fnmatch if needed)
-                        if pat.endswith("*") and msg.type.startswith(pat[:-1]):
+                        if (pat.endswith("*") and msg.type.startswith(pat[:-1])) or pat == msg.type or pat in str(message.get("channel", "")):
                             for h in handlers:
                                 try:
                                     h(msg)
                                 except Exception as e:
                                     logger.error(f"Handler error for {pat}: {e}")
-                        elif pat == msg.type or pat in message.get("channel", ""):
-                            for h in handlers:
-                                try:
-                                    h(msg)
-                                except Exception as e:
-                                    logger.error(f"Handler error: {e}")
                 except Exception as e:
                     logger.error(f"Listener error: {e}")
 
@@ -223,7 +237,6 @@ class CommsLayer:
         logger.info("CommsLayer closed")
 
 
-# Example usage (for reference / testing)
 if __name__ == "__main__":
     layer = CommsLayer(node_id="test-node")
     layer.register_node(node_type="worker")
@@ -232,5 +245,5 @@ if __name__ == "__main__":
         print(f"[Handler] Event received: {msg.type} from {msg.source}")
 
     layer.subscribe("event.*", on_event)
-    # In real use: threading.Thread(target=layer.start_listener).start()
-    print("CommsLayer example ready. Active nodes:", layer.get_active_nodes())
+    print("CommsLayer example ready. Workers:", layer.get_workers())
+    print("Recent events:", layer.get_recent_events(5))
