@@ -11,11 +11,10 @@ from comms.layer import CommsLayer
 """
 Aurora Swarm BTC - Production Miner Worker (Mesh-enabled)
 
-Every worker now participates in and perpetuates the Comms Layer mesh.
-- Self-registers on startup
-- Sends heartbeats
-- Publishes telemetry and events via the mesh
-- Can receive targeted commands
+Every worker participates in the Comms Layer mesh:
+- Self-registers + heartbeats
+- Publishes telemetry and events
+- Can receive targeted commands from scheduler / API
 """
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -29,7 +28,6 @@ SHARES_ACCEPTED = prom.Counter('aurora_shares_accepted_total', 'Accepted shares'
 WORKER_STATUS = prom.Gauge('aurora_worker_status', 'Worker status')
 HEALTH = prom.Gauge('aurora_worker_health', 'Health status')
 
-# Config
 GPUS_PER_POD = int(os.getenv("GPUS_PER_POD", "1"))
 WALLET = os.getenv("MINING_WALLET", "bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g")
 POOL_URL = os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333")
@@ -48,6 +46,20 @@ def parse_hashrate(line: str) -> float:
         multipliers = {'KH': 1e3, 'MH': 1e6, 'GH': 1e9, 'TH': 1e12}
         return rate * multipliers.get(unit, 1.0)
     return 0.0
+
+
+def handle_mesh_command(msg):
+    """Example command handler - extend this for real control."""
+    if isinstance(msg, dict):
+        action = msg.get("action") or msg.get("payload", {}).get("action")
+        if action == "adjust_intensity":
+            logger.info(f"[MESH CMD] Received intensity adjustment: {msg}")
+            # TODO: actually change bfgminer intensity
+        elif action == "pause":
+            logger.info("[MESH CMD] Pause requested")
+            # TODO: stop miner temporarily
+        else:
+            logger.info(f"[MESH CMD] Unknown command: {action}")
 
 
 def start_miner():
@@ -109,16 +121,19 @@ def main():
     prom.start_http_server(8000)
     logger.info(f"[MESH] Aurora Miner Worker started ({GPUS_PER_POD} GPU(s)) - joining comms mesh...")
 
-    # === MESH PARTICIPATION: Every worker perpetuates the Comms Layer ===
+    # Join the mesh
     comms.register_node(
         node_type="worker",
         metadata={
             "gpus": GPUS_PER_POD,
-            "pool": POOL_URL.split("://")[1] if "://" in POOL_URL else POOL_URL,
-            "version": "1.0-mesh"
+            "pool": POOL_URL,
+            "version": "mesh-v1"
         }
     )
-    comms.heartbeat()  # initial heartbeat
+    comms.heartbeat()
+
+    # Subscribe to commands directed at this specific node
+    comms.subscribe(f"node:{comms.node_id}", handle_mesh_command)
 
     last_health_report = time.time()
     last_mesh_heartbeat = time.time()
@@ -135,30 +150,22 @@ def main():
                 if hashrate > 0:
                     gh = hashrate / 1e9
                     HASH_RATE.set(round(gh, 2))
-                    # Publish via mesh (CommsLayer)
-                    comms.publish_telemetry({
-                        "hashrate_ghs": round(gh, 2),
-                        "status": "mining"
-                    })
+                    comms.publish_telemetry({"hashrate_ghs": round(gh, 2), "status": "mining"})
                     comms.set_state("worker:hashrate", round(gh, 2))
 
                 if "accepted" in line.lower():
                     SHARES_ACCEPTED.inc()
-                    comms.set_state("cluster:shares_accepted", comms.get_state("cluster:shares_accepted", 0) + 1)
-                    logger.info("Share accepted")
+                    current = comms.get_state("cluster:shares_accepted", 0)
+                    comms.set_state("cluster:shares_accepted", current + 1)
 
-                # Periodic mesh heartbeat + health report (every 30s)
                 now = time.time()
                 if now - last_health_report > 30:
                     comms.heartbeat(metadata={"status": "mining" if healthy else "degraded"})
-                    comms.publish_event("worker_heartbeat", {
-                        "healthy": healthy,
-                        "hashrate": round(gh, 2) if 'gh' in locals() else 0
-                    })
+                    comms.publish_event("worker_heartbeat", {"healthy": healthy})
                     last_health_report = now
 
                 if now - last_mesh_heartbeat > 15:
-                    comms.heartbeat()  # keep node alive in mesh registry
+                    comms.heartbeat()
                     last_mesh_heartbeat = now
 
             logger.warning("Miner exited. Restarting in 10s...")
