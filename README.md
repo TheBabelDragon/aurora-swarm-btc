@@ -2,48 +2,38 @@
 
 ** They yearn for the mines. **
 
-Now with resilient sensing integration ** and ** a powerful external API.
+The swarm runs on a living **Comms Layer mesh**. Every node (workers, scheduler, sensing, API) participates: self-registers, heartbeats, publishes telemetry/events, and can send/receive targeted messages.
 
-## Communications Layer (New)
+## Communications Layer (Mesh)
 
-Expanded with a dedicated **comms layer** (`comms/`) for clean, structured inter-component and swarm-wide communication.
+`comms/` is the central nervous system of the node grid.
 
-- `CommsLayer`: High-level abstraction over Redis pub/sub + state
-- Typed `SwarmMessage` (Pydantic)
-- Node registration & discovery (heartbeats, active nodes)
-- Convenience methods: `publish_event()`, `publish_telemetry()`, `send_command()`, `send_sensing_command()`
-- Subscription handlers + listener loop
-- Backward compatible with existing Redis channels
+- `CommsLayer`: Mesh-aware abstraction (Redis backbone + node registry + targeted messaging)
+- Every node joins via `register_node()` + `heartbeat()`
+- `send_to_node()`, `broadcast_to_workers()`, event history
+- Typed `SwarmMessage`
+- Full backward compatibility with existing channels
 
-Usage example:
-```python
-from comms.layer import CommsLayer, SwarmMessage
+**The mining nodes themselves perpetuate the mesh.**
 
-layer = CommsLayer(node_id="worker-01")
-layer.register_node(node_type="worker")
-layer.publish_event("mining_started", {"hashrate": 120})
-layer.send_sensing_command("adjust_gain", factor=1.2)
-```
-
-See `comms/layer.py` for full API and examples.
+See `comms/layer.py` and `worker/miner_worker.py` for the implementation.
 
 ## External API
 
-The swarm exposes a clean, versioned REST + WebSocket API so external systems can integrate easily.
+Fully integrated with the mesh.
 
-- Run with: ` uvicorn api.main:app --port 8001 `
-- Docs: ` http://localhost:8001/docs `
-- Real-time events via WebSocket at ` /ws/events `
-- Commands are published to the Redis bus
+- `uvicorn api.main:app --port 8001`
+- Live data from node registry and event history
+- WebSocket at `/ws/events`
 
-See ` api/README.md ` for full details.
+See `api/README.md`.
 
 ## Key Features
 
-- Rich context sharing with WiFi CSI sensing system
-- Heartbeat monitoring + graceful degradation
-- External API with WebSocket support
-- Working PolicyEngine + command routing
-- **New:** Structured Comms Layer for swarm coordination
+- WiFi CSI sensing integration with policy-driven actions
+- Self-healing worker mesh (registration + heartbeats)
+- Dynamic discovery of active nodes
+- Real-time events and telemetry via CommsLayer
+- Production dashboard (Comms Operations Center)
 
-** They do yearn. Now they have eyes, a brain, a voice, * an API *, **and a proper voice for talking to each other**. **
+** They do yearn. Now they have eyes, a brain, a voice, an API, **and they talk to each other in a living mesh**. **
