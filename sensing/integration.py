@@ -88,12 +88,12 @@ class SensingIntegration:
         """Main listening loop. Subscribes to sensing channels via mesh."""
         logger.info("[MESH] SensingIntegration listening on sensing channels...")
 
-        # Subscribe to relevant patterns through CommsLayer if extended,
-        # otherwise fall back to direct Redis for compatibility with SwarmBridge
         import redis
         r = redis.from_url(self.redis_url, decode_responses=True)
         pubsub = r.pubsub()
         pubsub.psubscribe("aurora:sensing:*")
+
+        last_check = time.time()
 
         for message in pubsub.listen():
             if message['type'] == 'pmessage':
