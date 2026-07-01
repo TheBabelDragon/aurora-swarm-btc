@@ -3,7 +3,17 @@ import json
 import redis
 from typing import Any
 
+
 class Bus:
+    """
+    Low-level Redis wrapper.
+
+    Note: For most new code, prefer `comms.layer.CommsLayer` which builds on similar
+    patterns but adds mesh node registration, typed messages, event history,
+    and first-class support for the wifi-sensing-system integration.
+    This class is kept for backward compatibility with older components.
+    """
+
     def __init__(self):
         self.r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), 
                                socket_connect_timeout=10, socket_timeout=10)
