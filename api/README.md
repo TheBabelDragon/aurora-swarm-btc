@@ -1,13 +1,13 @@
-# Aurora Swarm BTC - External API (Near Full Connection)
+# Aurora Swarm BTC - External API
 
-This API is now substantially wired into the swarm.
+The API is fully wired into the swarm via the Comms Layer mesh.
 
 ## Key Capabilities
 
-- Send real commands that are published to the Redis bus
-- Get reasonably live status and metrics
-- WebSocket endpoint that receives events when commands are sent
-- Clean structure ready for further expansion
+- Send commands that flow through `CommsLayer` (targeted or broadcast)
+- Get live status, metrics, and active workers from the node registry
+- WebSocket real-time event stream (events published via mesh)
+- Clean, versioned, documented surface for external systems
 
 ## Running
 
@@ -15,12 +15,14 @@ This API is now substantially wired into the swarm.
 uvicorn api.main:app --port 8001
 ```
 
-Visit `http://localhost:8001/docs` for interactive documentation.
+Interactive docs: `http://localhost:8001/docs`
 
-## Notable Endpoints
+## Endpoints
 
-- `POST /api/v1/commands/` → Publishes to Redis + broadcasts via WebSocket
-- `GET /api/v1/status/`, `/metrics/`, `/workers/`, `/events/`
+- `POST /api/v1/commands/` — publishes via CommsLayer
+- `GET /api/v1/status/`, `/metrics/`, `/workers/`, `/events/` — dynamic data from mesh + Redis
 - WebSocket: `ws://localhost:8001/ws/events`
 
-The API is now meaningfully connected to the swarm's internal systems.
+All routers now consume the `CommsLayer` for dynamic worker discovery, event history, and telemetry.
+
+See `comms/layer.py` for the mesh implementation.
