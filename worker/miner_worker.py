@@ -9,12 +9,12 @@ import prometheus_client as prom
 from comms.layer import CommsLayer
 
 """
-Aurora Swarm BTC - Production Miner Worker (Mesh-enabled)
+Aurora Swarm BTC - Production Miner Worker (Mesh-enabled + Useful Commands)
 
-Every worker participates in the Comms Layer mesh:
-- Self-registers + heartbeats
-- Publishes telemetry and events
-- Can receive targeted commands from scheduler / API
+Workers now fully participate in the mesh and can execute real commands:
+- adjust_intensity
+- pause / resume
+- restart_miner
 """
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -36,6 +36,8 @@ INTENSITY = os.getenv("INTENSITY", "19")
 
 miner_process = None
 healthy = True
+paused = False
+current_intensity = INTENSITY
 
 
 def parse_hashrate(line: str) -> float:
@@ -48,22 +50,11 @@ def parse_hashrate(line: str) -> float:
     return 0.0
 
 
-def handle_mesh_command(msg):
-    """Example command handler - extend this for real control."""
-    if isinstance(msg, dict):
-        action = msg.get("action") or msg.get("payload", {}).get("action")
-        if action == "adjust_intensity":
-            logger.info(f"[MESH CMD] Received intensity adjustment: {msg}")
-            # TODO: actually change bfgminer intensity
-        elif action == "pause":
-            logger.info("[MESH CMD] Pause requested")
-            # TODO: stop miner temporarily
-        else:
-            logger.info(f"[MESH CMD] Unknown command: {action}")
+def start_miner(intensity: str = None):
+    global miner_process, healthy, current_intensity
+    use_intensity = intensity or current_intensity
+    current_intensity = use_intensity
 
-
-def start_miner():
-    global miner_process, healthy
     cmd = [
         "bfgminer",
         "-o", POOL_URL,
@@ -71,19 +62,20 @@ def start_miner():
         "-p", "x",
         "--no-getwork",
         "-S", "opencl:auto",
-        "--intensity", INTENSITY,
+        "--intensity", str(use_intensity),
         "--api-listen",
         "--quiet"
     ]
     if GPUS_PER_POD > 1:
         cmd.extend(["--set", f"gpu_count={GPUS_PER_POD}"])
 
-    logger.info(f"Starting bfgminer ({GPUS_PER_POD} GPU(s))...")
+    logger.info(f"Starting bfgminer with intensity={use_intensity} ({GPUS_PER_POD} GPU(s))...")
     try:
         miner_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         WORKER_STATUS.set(1)
         HEALTH.set(1)
         healthy = True
+        paused = False
         return miner_process
     except Exception as e:
         logger.error(f"Failed to start miner: {e}")
@@ -93,7 +85,7 @@ def start_miner():
 
 
 def stop_miner():
-    global miner_process, healthy
+    global miner_process, healthy, paused
     if miner_process and miner_process.poll() is None:
         logger.info("Stopping miner...")
         miner_process.terminate()
@@ -104,7 +96,48 @@ def stop_miner():
         WORKER_STATUS.set(0)
         HEALTH.set(0)
         healthy = False
+        paused = True
         miner_process = None
+
+
+def handle_mesh_command(msg):
+    """Execute real commands received via the mesh."""
+    global current_intensity, paused
+
+    if not isinstance(msg, dict):
+        return
+
+    payload = msg.get("payload", msg)
+    action = payload.get("action") or msg.get("action")
+
+    if action == "adjust_intensity":
+        new_intensity = str(payload.get("factor", current_intensity))
+        logger.info(f"[MESH CMD] Adjusting intensity to {new_intensity}")
+        if miner_process:
+            stop_miner()
+            time.sleep(2)
+            start_miner(new_intensity)
+        else:
+            current_intensity = new_intensity
+
+    elif action == "pause":
+        logger.info("[MESH CMD] Pausing miner")
+        stop_miner()
+        paused = True
+
+    elif action == "resume":
+        logger.info("[MESH CMD] Resuming miner")
+        if paused or not miner_process:
+            start_miner(current_intensity)
+
+    elif action == "restart_miner":
+        logger.info("[MESH CMD] Restarting miner")
+        stop_miner()
+        time.sleep(3)
+        start_miner(current_intensity)
+
+    else:
+        logger.info(f"[MESH CMD] Unknown command received: {action}")
 
 
 def shutdown_handler(signum, frame):
@@ -127,58 +160,58 @@ def main():
         metadata={
             "gpus": GPUS_PER_POD,
             "pool": POOL_URL,
-            "version": "mesh-v1"
+            "version": "mesh-v1-useful"
         }
     )
     comms.heartbeat()
 
-    # Subscribe to commands directed at this specific node
+    # Subscribe to commands directed at this node
     comms.subscribe(f"node:{comms.node_id}", handle_mesh_command)
 
     last_health_report = time.time()
     last_mesh_heartbeat = time.time()
 
+    # Start miner initially
+    start_miner()
+
     while True:
         try:
-            process = start_miner()
-            if process is None:
-                time.sleep(15)
+            if miner_process is None and not paused:
+                start_miner(current_intensity)
+                time.sleep(5)
                 continue
 
-            for line in process.stdout:
-                hashrate = parse_hashrate(line)
-                if hashrate > 0:
-                    gh = hashrate / 1e9
-                    HASH_RATE.set(round(gh, 2))
-                    comms.publish_telemetry({"hashrate_ghs": round(gh, 2), "status": "mining"})
-                    comms.set_state("worker:hashrate", round(gh, 2))
+            if miner_process:
+                for line in miner_process.stdout:
+                    hashrate = parse_hashrate(line)
+                    if hashrate > 0:
+                        gh = hashrate / 1e9
+                        HASH_RATE.set(round(gh, 2))
+                        comms.publish_telemetry({"hashrate_ghs": round(gh, 2), "status": "mining"})
+                        comms.set_state("worker:hashrate", round(gh, 2))
 
-                if "accepted" in line.lower():
-                    SHARES_ACCEPTED.inc()
-                    current = comms.get_state("cluster:shares_accepted", 0)
-                    comms.set_state("cluster:shares_accepted", current + 1)
+                    if "accepted" in line.lower():
+                        SHARES_ACCEPTED.inc()
+                        current = comms.get_state("cluster:shares_accepted", 0)
+                        comms.set_state("cluster:shares_accepted", current + 1)
 
-                now = time.time()
-                if now - last_health_report > 30:
-                    comms.heartbeat(metadata={"status": "mining" if healthy else "degraded"})
-                    comms.publish_event("worker_heartbeat", {"healthy": healthy})
-                    last_health_report = now
+                    now = time.time()
+                    if now - last_health_report > 30:
+                        comms.heartbeat(metadata={"status": "mining" if healthy else "degraded", "intensity": current_intensity})
+                        comms.publish_event("worker_heartbeat", {"healthy": healthy, "intensity": current_intensity})
+                        last_health_report = now
 
-                if now - last_mesh_heartbeat > 15:
-                    comms.heartbeat()
-                    last_mesh_heartbeat = now
+                    if now - last_mesh_heartbeat > 15:
+                        comms.heartbeat()
+                        last_mesh_heartbeat = now
 
-            logger.warning("Miner exited. Restarting in 10s...")
-            WORKER_STATUS.set(0)
-            HEALTH.set(0)
-            healthy = False
-            time.sleep(10)
+            time.sleep(1)
 
         except Exception as e:
             logger.error(f"Worker error: {e}")
             HEALTH.set(0)
             healthy = False
-            time.sleep(15)
+            time.sleep(10)
 
 
 if __name__ == "__main__":
