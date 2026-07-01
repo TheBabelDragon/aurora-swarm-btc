@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, JSONResponse
 from control.bus import Bus
 from comms.layer import CommsLayer
 import uvicorn
@@ -30,12 +30,10 @@ def status():
 
 @app.get("/nodes")
 def get_nodes():
-    """Live swarm nodes from CommsLayer registry."""
     return {"nodes": comms.get_active_nodes()}
 
 @app.get("/events")
 def get_events(limit: int = 20):
-    """Recent events from CommsLayer history."""
     return {"events": comms.get_recent_events(limit)}
 
 @app.get("/comms-health")
@@ -47,13 +45,38 @@ def comms_health():
         "recent_events_count": len(comms.get_recent_events(5))
     }
 
+# === Command API (exposed for UI and external use) ===
+
+@app.post("/command/broadcast")
+async def broadcast_command(action: str = Form(...), factor: float = Form(None), reason: str = Form("manual")):
+    payload = {"action": action}
+    if factor is not None:
+        payload["factor"] = factor
+    if reason:
+        payload["reason"] = reason
+
+    comms.broadcast_to_workers(payload)
+    logger.info(f"[DASH] Broadcast command: {action} factor={factor}")
+    return {"status": "sent", "action": action, "target": "all_workers"}
+
+@app.post("/command/to_node/{node_id}")
+async def command_to_node(node_id: str, action: str = Form(...), factor: float = Form(None), reason: str = Form("manual")):
+    payload = {"action": action}
+    if factor is not None:
+        payload["factor"] = factor
+    if reason:
+        payload["reason"] = reason
+
+    comms.send_to_node(node_id, payload)
+    logger.info(f"[DASH] Command to {node_id}: {action}")
+    return {"status": "sent", "action": action, "target": node_id}
+
 @app.get("/healthz")
 def healthz():
     return {"status": "healthy"}
 
 @app.get("/", response_class=HTMLResponse)
 def root():
-    """Simple HTML UI for the Comms Operations Center (better draw than raw mining stats)."""
     html = """
     <html>
     <head>
@@ -64,41 +87,102 @@ def root():
             .card { background: #111; border: 1px solid #0f0; padding: 20px; margin: 20px 0; border-radius: 8px; }
             pre { background: #000; padding: 15px; overflow-x: auto; }
             .metric { font-size: 2em; font-weight: bold; }
+            button { background: #003300; color: #0f0; border: 1px solid #0f0; padding: 8px 16px; margin: 4px; cursor: pointer; }
+            button:hover { background: #005500; }
+            .control-group { margin: 15px 0; }
+            input, select { background: #000; color: #0f0; border: 1px solid #0f0; padding: 6px; margin: 4px; }
         </style>
     </head>
     <body>
         <h1>🚀 Aurora Swarm BTC — Comms Operations Center</h1>
-        <p><strong>They yearn for the mines... and now they talk to each other.</strong></p>
-        
+        <p><strong>They yearn for the mines... and now you can control them.</strong></p>
+
         <div class="card">
             <h2>Swarm Status</h2>
             <div id="status">Loading...</div>
         </div>
-        
+
         <div class="card">
-            <h2>Active Nodes (Comms Registry)</h2>
+            <h2>Active Nodes</h2>
             <pre id="nodes">Loading...</pre>
         </div>
-        
+
         <div class="card">
-            <h2>Recent Events (Comms History)</h2>
+            <h2>Recent Events</h2>
             <pre id="events">Loading...</pre>
         </div>
-        
+
+        <!-- === COMMAND CONTROL PANEL === -->
+        <div class="card">
+            <h2>Command Control</h2>
+
+            <div class="control-group">
+                <h3>Broadcast to All Workers</h3>
+                <button onclick="sendBroadcast('adjust_intensity', 0.85)">Scale Down (85%)</button>
+                <button onclick="sendBroadcast('adjust_intensity', 1.0)">Normal (100%)</button>
+                <button onclick="sendBroadcast('adjust_intensity', 1.15)">Scale Up (115%)</button>
+                <button onclick="sendBroadcast('pause')">Pause All</button>
+                <button onclick="sendBroadcast('resume')">Resume All</button>
+                <button onclick="sendBroadcast('restart_miner')">Restart All</button>
+            </div>
+
+            <div class="control-group">
+                <h3>Send to Specific Node</h3>
+                <input type="text" id="target_node" placeholder="worker-01" style="width: 200px;">
+                <button onclick="sendToNode('pause')">Pause</button>
+                <button onclick="sendToNode('resume')">Resume</button>
+                <button onclick="sendToNode('restart_miner')">Restart</button>
+                <button onclick="sendToNode('adjust_intensity', 0.9)">Intensity 90%</button>
+            </div>
+
+            <div id="command_result" style="margin-top: 15px; color: #ff0;"></div>
+        </div>
+
         <script>
             async function refresh() {
                 const status = await fetch('/status').then(r => r.json());
-                document.getElementById('status').innerHTML = 
+                document.getElementById('status').innerHTML =
                     `<div class="metric">${status.active_workers} workers</div>` +
                     `<p>Entropy: ${status.entropy} | Hashrate: ${status.total_ths} TH/s</p>` +
                     `<p>Mood: ${status.mood}</p>`;
-                
+
                 const nodes = await fetch('/nodes').then(r => r.json());
                 document.getElementById('nodes').innerText = JSON.stringify(nodes, null, 2);
-                
+
                 const events = await fetch('/events?limit=10').then(r => r.json());
                 document.getElementById('events').innerText = JSON.stringify(events, null, 2);
             }
+
+            async function sendBroadcast(action, factor = null) {
+                const formData = new FormData();
+                formData.append('action', action);
+                if (factor !== null) formData.append('factor', factor);
+                formData.append('reason', 'dashboard_manual');
+
+                const res = await fetch('/command/broadcast', { method: 'POST', body: formData });
+                const data = await res.json();
+                document.getElementById('command_result').innerText = `Broadcast sent: ${data.action} → ${data.target}`;
+                setTimeout(() => document.getElementById('command_result').innerText = '', 4000);
+            }
+
+            async function sendToNode(action, factor = null) {
+                const nodeId = document.getElementById('target_node').value.trim();
+                if (!nodeId) {
+                    alert('Please enter a target node ID');
+                    return;
+                }
+
+                const formData = new FormData();
+                formData.append('action', action);
+                if (factor !== null) formData.append('factor', factor);
+                formData.append('reason', 'dashboard_manual');
+
+                const res = await fetch(`/command/to_node/${nodeId}`, { method: 'POST', body: formData });
+                const data = await res.json();
+                document.getElementById('command_result').innerText = `Command to ${data.target}: ${data.action}`;
+                setTimeout(() => document.getElementById('command_result').innerText = '', 4000);
+            }
+
             refresh();
             setInterval(refresh, 5000);
         </script>
