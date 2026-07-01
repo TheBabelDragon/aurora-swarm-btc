@@ -2,38 +2,33 @@
 
 ** They yearn for the mines. **
 
-The swarm runs on a living **Comms Layer mesh**. Every node (workers, scheduler, sensing, API) participates: self-registers, heartbeats, publishes telemetry/events, and can send/receive targeted messages.
+**This project + [wifi-sensing-system](https://github.com/TheBabelDragon/wifi-sensing-system) together form the complete Aurora stack.**
 
-## Communications Layer (Mesh)
+WiFi CSI spatial intelligence (from `wifi-sensing-system`) + entropy-driven mining swarm coordination (this repo) communicate through the shared **Comms Layer mesh**.
 
-`comms/` is the central nervous system of the node grid.
+## Communications Layer (Mesh) + Sensing Synergy
 
-- `CommsLayer`: Mesh-aware abstraction (Redis backbone + node registry + targeted messaging)
-- Every node joins via `register_node()` + `heartbeat()`
-- `send_to_node()`, `broadcast_to_workers()`, event history
-- Typed `SwarmMessage`
-- Full backward compatibility with existing channels
+The `comms/` layer is the shared nervous system.
 
-**The mining nodes themselves perpetuate the mesh.**
+- Both projects publish/consume through Redis + high-level abstractions
+- `wifi-sensing-system` uses `SwarmBridge` + `AuroraAdapter`
+- `aurora-swarm-btc` uses `CommsLayer` (workers, scheduler, and now sensing all participate)
+- Sensing is a first-class mesh node (type: `sensing`)
+- Full bidirectional command + context flow
 
-See `comms/layer.py` and `worker/miner_worker.py` for the implementation.
+See `INTEGRATION_CONTRACT.md` (v1.1 - Maximum Alignment) and `sensing/integration.py`.
 
 ## External API
 
 Fully integrated with the mesh.
 
-- `uvicorn api.main:app --port 8001`
-- Live data from node registry and event history
-- WebSocket at `/ws/events`
-
 See `api/README.md`.
 
 ## Key Features
 
-- WiFi CSI sensing integration with policy-driven actions
-- Self-healing worker mesh (registration + heartbeats)
-- Dynamic discovery of active nodes
-- Real-time events and telemetry via CommsLayer
-- Production dashboard (Comms Operations Center)
+- Real WiFi CSI sensing integration (via paired `wifi-sensing-system`)
+- Self-healing worker mesh with dynamic discovery
+- Policy-driven actions from physical context
+- Production Comms Operations Center dashboard
 
-** They do yearn. Now they have eyes, a brain, a voice, an API, **and they talk to each other in a living mesh**. **
+** They do yearn. Now they have eyes (CSI), a brain (policy + mesh), a voice, an API, **and they coordinate as one living system**. **
