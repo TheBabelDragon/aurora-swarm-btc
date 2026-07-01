@@ -2,33 +2,40 @@
 
 ** They yearn for the mines. **
 
-**This project + [wifi-sensing-system](https://github.com/TheBabelDragon/wifi-sensing-system) together form the complete Aurora stack.**
+**This project + [wifi-sensing-system](https://github.com/TheBabelDragon/wifi-sensing-system) = the complete Aurora stack.**
 
-WiFi CSI spatial intelligence (from `wifi-sensing-system`) + entropy-driven mining swarm coordination (this repo) communicate through the shared **Comms Layer mesh**.
+Physical intelligence (WiFi CSI) + mining swarm coordination through a shared **Comms Layer mesh**.
 
-## Communications Layer (Mesh) + Sensing Synergy
+## Quick Start - Control the Swarm
 
-The `comms/` layer is the shared nervous system.
+1. Start the dashboard:
+   ```bash
+   cd dashboard && python dashboard.py
+   ```
+   Open http://localhost:8000
 
-- Both projects publish/consume through Redis + high-level abstractions
-- `wifi-sensing-system` uses `SwarmBridge` + `AuroraAdapter`
-- `aurora-swarm-btc` uses `CommsLayer` (workers, scheduler, and now sensing all participate)
-- Sensing is a first-class mesh node (type: `sensing`)
-- Full bidirectional command + context flow
+2. Use the **Command Control** panel:
+   - Broadcast fleet commands (scale intensity, pause, resume, restart)
+   - Target individual workers by node ID
 
-See `INTEGRATION_CONTRACT.md` (v1.1 - Maximum Alignment) and `sensing/integration.py`.
+3. The scheduler runs autonomous logic (recovery, occupancy response, thermal management).
 
-## External API
+4. Workers execute real commands received via the mesh.
 
-Fully integrated with the mesh.
+See `dashboard/dashboard.py` for the command endpoints and `worker/miner_worker.py` for execution logic.
 
-See `api/README.md`.
+## Architecture Highlights
+
+- `comms/layer.py` — The mesh (node registration, heartbeats, targeted + broadcast messaging, event history)
+- Workers, scheduler, and sensing are first-class mesh participants
+- Full bidirectional integration with `wifi-sensing-system`
+- Live command & control UI in the dashboard
 
 ## Key Features
 
-- Real WiFi CSI sensing integration (via paired `wifi-sensing-system`)
-- Self-healing worker mesh with dynamic discovery
-- Policy-driven actions from physical context
-- Production Comms Operations Center dashboard
+- Real WiFi CSI sensing integration
+- Self-healing + environment-aware swarm
+- Practical fleet control (intensity, pause, restart)
+- Clean observability and manual override
 
-** They do yearn. Now they have eyes (CSI), a brain (policy + mesh), a voice, an API, **and they coordinate as one living system**. **
+** They do yearn. Now they have eyes, a brain, a voice, an API, **and you can actually control them from the browser**. **
