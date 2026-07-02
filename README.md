@@ -24,6 +24,33 @@ Physical intelligence (WiFi CSI) + mining swarm coordination through a shared **
 
 See `dashboard/dashboard.py` for the command endpoints and `worker/miner_worker.py` for execution logic.
 
+## Deployment (Docker Compose)
+
+### Control Plane (Recommended on main host)
+```bash
+cp .env.example .env
+# Edit .env with your values
+
+docker compose up -d --build
+```
+
+Access:
+- Dashboard UI: http://your-host:8000
+- API: http://your-host:8001
+
+### Worker Plane (Run on other machines)
+```bash
+cp .env.example .env
+# Set REDIS_URL to point to your control host
+# Set WORKER_NAME, INTENSITY, etc.
+
+docker compose -f docker-compose.worker.yml up -d --build
+```
+
+Workers will automatically join the mesh and appear in the dashboard.
+
+See `docker-compose.yml` and `docker-compose.worker.yml` for details.
+
 ## Architecture Highlights
 
 - `comms/layer.py` — The mesh (node registration, heartbeats, targeted + broadcast messaging, event history)
