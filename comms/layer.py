@@ -2,7 +2,7 @@ import os
 import json
 import time
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
 import redis
@@ -22,18 +22,20 @@ class SwarmMessage(BaseModel):
 
 class CommsLayer:
     """
-    High-level Communications Layer for the Aurora Swarm.
+    High-level Communications Layer for the Aurora Swarm (Hybrid Node Model).
 
-    Mesh-aware design: every node that instantiates CommsLayer becomes part of the living node grid.
-    - Self-registration + heartbeats
-    - Targeted node-to-node messaging
-    - Broadcast to groups (workers, etc.)
+    Supports:
+    - Core node types (worker, coordinator, sensing, interface, gateway)
+    - Explicit capabilities for fine-grained behavior
+    - Mesh participation with registration + heartbeats
+    - Targeted messaging and broadcasting
     - Event history
-    - Full synergy with sensing, scheduler, API, and workers
     """
 
     EVENT_HISTORY_KEY = "events:history"
     MAX_EVENTS = 100
+
+    CORE_NODE_TYPES = {"worker", "coordinator", "sensing", "interface", "gateway"}
 
     def __init__(self, redis_url: Optional[str] = None, node_id: Optional[str] = None):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -42,7 +44,7 @@ class CommsLayer:
         self.pubsub = self.r.pubsub()
         self.handlers: Dict[str, List[Callable[[SwarmMessage], None]]] = {}
         self._subscribed_patterns: List[str] = []
-        logger.info(f"CommsLayer initialized for node={self.node_id} redis={self.redis_url}")
+        logger.info(f"CommsLayer initialized for node={self.node_id}")
 
     # --- Core primitives ---
 
@@ -90,26 +92,54 @@ class CommsLayer:
         except Exception:
             return []
 
-    # --- Mesh / Node Grid Primitives ---
+    # --- Mesh / Node Registration with Capabilities ---
 
-    def register_node(self, node_id: Optional[str] = None, node_type: str = "worker", metadata: Optional[Dict] = None, ttl: int = 90):
-        """Join the mesh. Every node should call this on startup."""
+    def register_node(
+        self,
+        node_id: Optional[str] = None,
+        node_type: str = "worker",
+        capabilities: Optional[List[str]] = None,
+        metadata: Optional[Dict] = None,
+        ttl: int = 90
+    ):
+        """
+        Register this node in the mesh with type and capabilities.
+
+        node_type should be one of: worker, coordinator, sensing, interface, gateway
+        capabilities: list of things this node can do (e.g. ["gpu_mining", "intensity_control"])
+        """
+        if node_type not in self.CORE_NODE_TYPES:
+            logger.warning(f"Unknown node_type '{node_type}'. Consider using one of {self.CORE_NODE_TYPES}")
+
         nid = node_id or self.node_id
+        caps: Set[str] = set(capabilities or [])
+
         data = {
             "node_id": nid,
             "type": node_type,
+            "capabilities": list(caps),
             "last_seen": time.time(),
             "metadata": metadata or {}
         }
+
         self.set_state(f"nodes:{nid}", data, expire=ttl)
         self.r.sadd(f"aurora:nodes:{node_type}", nid)
         self.r.expire(f"aurora:nodes:{node_type}", ttl * 2)
-        logger.info(f"[MESH] Node joined: {nid} (type={node_type})")
+
+        # Also index by capability for fast lookup
+        for cap in caps:
+            self.r.sadd(f"aurora:capability:{cap}", nid)
+
+        logger.info(f"[MESH] Registered {nid} (type={node_type}, capabilities={caps})")
 
     def heartbeat(self, node_id: Optional[str] = None, metadata: Optional[Dict] = None):
-        """Keep-alive for the mesh. Call periodically from every node."""
         nid = node_id or self.node_id
-        self.register_node(nid, metadata=metadata)
+        existing = self.get_state(f"nodes:{nid}")
+        if existing:
+            existing["last_seen"] = time.time()
+            if metadata:
+                existing["metadata"].update(metadata)
+            self.set_state(f"nodes:{nid}", existing, expire=90)
 
     def get_active_nodes(self, node_type: Optional[str] = None) -> List[Dict]:
         if node_type:
@@ -117,6 +147,17 @@ class CommsLayer:
         else:
             keys = self.r.keys("aurora:nodes:*")
             node_ids = [k.split(":")[-1] for k in keys if ":nodes:" in k]
+
+        nodes = []
+        for nid in node_ids:
+            data = self.get_state(f"nodes:{nid}")
+            if data:
+                nodes.append(data)
+        return nodes
+
+    def get_nodes_by_capability(self, capability: str) -> List[Dict]:
+        """Get all active nodes that have a specific capability."""
+        node_ids = self.r.smembers(f"aurora:capability:{capability}") or []
         nodes = []
         for nid in node_ids:
             data = self.get_state(f"nodes:{nid}")
@@ -127,25 +168,32 @@ class CommsLayer:
     def get_workers(self) -> List[Dict]:
         return self.get_active_nodes(node_type="worker")
 
+    # --- Messaging ---
+
     def send_to_node(self, target_node_id: str, message: Any):
-        """Direct targeted message to a specific node in the mesh (pubsub to its channel)."""
         if isinstance(message, BaseModel):
             message = message.model_dump_json()
         elif isinstance(message, (dict, list)):
             message = json.dumps(message)
         channel = f"node:{target_node_id}"
         self.publish(channel, message)
-        logger.debug(f"[MESH] Sent direct to {target_node_id}")
 
     def broadcast_to_workers(self, message: Any):
-        """Broadcast to all currently known workers in the mesh."""
         workers = self.get_workers()
         for w in workers:
             nid = w.get("node_id")
             if nid and nid != self.node_id:
                 self.send_to_node(nid, message)
 
-    # --- High-level Aurora methods (mesh-aware) ---
+    def broadcast_to_capability(self, capability: str, message: Any):
+        """Send a message to all nodes that have a specific capability."""
+        nodes = self.get_nodes_by_capability(capability)
+        for node in nodes:
+            nid = node.get("node_id")
+            if nid and nid != self.node_id:
+                self.send_to_node(nid, message)
+
+    # --- High-level methods ---
 
     def publish_event(self, event_type: str, data: Dict[str, Any], source: Optional[str] = None):
         msg = SwarmMessage(type=f"event.{event_type}", payload=data, source=source or self.node_id)
@@ -167,7 +215,7 @@ class CommsLayer:
     def send_sensing_command(self, action: str, **kwargs):
         self.send_command(action, payload=kwargs, target="sensing")
 
-    # --- Subscription ---
+    # --- Subscription handling ---
 
     def subscribe(self, pattern: str, handler: Callable[[SwarmMessage], None]):
         if pattern not in self.handlers:
@@ -180,6 +228,7 @@ class CommsLayer:
             if p not in self._subscribed_patterns:
                 self.pubsub.psubscribe(p)
                 self._subscribed_patterns.append(p)
+
         logger.info(f"[MESH] Listener started on: {self._subscribed_patterns}")
 
         for message in self.pubsub.listen():
@@ -187,6 +236,7 @@ class CommsLayer:
                 try:
                     raw = message.get("data", "")
                     data = json.loads(raw) if isinstance(raw, str) else raw
+
                     if isinstance(data, dict) and "type" in data:
                         try:
                             msg = SwarmMessage(**data)
@@ -213,7 +263,12 @@ class CommsLayer:
 
 
 if __name__ == "__main__":
-    layer = CommsLayer(node_id="test-mesh-node")
-    layer.register_node(node_type="worker", metadata={"gpus": 1})
-    layer.heartbeat()
-    print("Mesh node ready. Workers in grid:", [n["node_id"] for n in layer.get_workers()])
+    layer = CommsLayer(node_id="test-node")
+    layer.register_node(
+        node_type="worker",
+        capabilities=["gpu_mining", "intensity_control", "pause_resume"],
+        metadata={"gpus": 1}
+    )
+    print("Registered with capabilities.")
+    print("Workers:", [n["node_id"] for n in layer.get_workers()])
+    print("Nodes with intensity_control:", [n["node_id"] for n in layer.get_nodes_by_capability("intensity_control")])
