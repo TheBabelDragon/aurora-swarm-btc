@@ -11,10 +11,7 @@ from comms.layer import CommsLayer
 """
 Aurora Swarm BTC - Production Miner Worker (Mesh-enabled + Useful Commands)
 
-Workers now fully participate in the mesh and can execute real commands:
-- adjust_intensity
-- pause / resume
-- restart_miner
+Workers now fully participate in the mesh with proper type + capabilities.
 """
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -101,7 +98,6 @@ def stop_miner():
 
 
 def handle_mesh_command(msg):
-    """Execute real commands received via the mesh."""
     global current_intensity, paused
 
     if not isinstance(msg, dict):
@@ -154,13 +150,18 @@ def main():
     prom.start_http_server(8000)
     logger.info(f"[MESH] Aurora Miner Worker started ({GPUS_PER_POD} GPU(s)) - joining comms mesh...")
 
-    # Join the mesh
+    # Join the mesh with proper type + capabilities
     comms.register_node(
         node_type="worker",
+        capabilities=[
+            "gpu_mining",
+            "intensity_control",
+            "pause_resume",
+            "restart"
+        ],
         metadata={
             "gpus": GPUS_PER_POD,
-            "pool": POOL_URL,
-            "version": "mesh-v1-useful"
+            "pool": POOL_URL
         }
     )
     comms.heartbeat()
@@ -171,7 +172,6 @@ def main():
     last_health_report = time.time()
     last_mesh_heartbeat = time.time()
 
-    # Start miner initially
     start_miner()
 
     while True:
