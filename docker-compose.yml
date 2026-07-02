@@ -1,0 +1,60 @@
+version: '3.8'
+
+# Aurora Swarm BTC - Control Plane
+# Run this on your main host (e.g. one G6 Mini)
+# Workers can run on this host or other machines
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aurora-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: scheduler/Dockerfile
+    container_name: aurora-scheduler
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - aurora-net
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: aurora-dashboard
+    ports:
+      - "8000:8000"   # Dashboard UI
+      - "8001:8001"   # API
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - aurora-net
+
+networks:
+  aurora-net:
+    driver: bridge
+
+volumes:
+  redis_data:
