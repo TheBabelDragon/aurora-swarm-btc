@@ -1,0 +1,9 @@
+{
+  "name": "gpu_utilization_balancer",
+  "type": "scheduler",
+  "version": "0.1.0",
+  "entry": "entrypoint.py",
+  "enabled": true,
+  "dependencies": ["comms"],
+  "description": "Avoids nodes with high GPU utilization when selecting workers"
+}
