@@ -4,6 +4,11 @@ This directory contains all experimental and pluggable behavior for the swarm.
 
 **Core Rule**: Never modify core logic directly for experiments. All new behavior starts here as a mod.
 
+## Current Mods
+
+- `thermal_aware_scheduler` — Prioritizes cooler nodes
+- `gpu_utilization_balancer` — Avoids highly utilized GPUs
+
 ## Mod Structure
 
 ```
@@ -11,7 +16,7 @@ mods/
   <mod_name>/
     manifest.json
     entrypoint.py
-    config.yaml
+    config.yaml (optional)
     hooks/
       on_*.py
     tasks/
@@ -21,12 +26,8 @@ mods/
 ## How Mods Work
 
 1. Core exposes hooks (e.g. `on_node_select`)
-2. Enabled mods subscribe to relevant hooks
-3. Mods can modify behavior before core continues
-
-## Current Mods
-
-- (List will be maintained here)
+2. Enabled mods subscribe to relevant hooks via `entrypoint.py`
+3. Mods can modify behavior before core continues execution
 
 ## Development Rules
 
@@ -34,3 +35,5 @@ mods/
 - Test in isolation
 - Disable easily if unstable
 - Only promote to core after long-term stability
+
+See `scheduler/hook_registry.py` and `scheduler/node_selector.py` for how hooks are used.
