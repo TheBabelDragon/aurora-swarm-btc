@@ -1,6 +1,13 @@
 """Node Selector with Mod Hook Support.
 
 This provides a clean extension point for scheduler mods.
+
+Usage (recommended):
+    from scheduler import select_node
+
+    selected_node = select_node(available_nodes, current_task)
+
+Mods can influence selection by registering 'on_node_select' hooks.
 """
 
 from typing import List, Dict, Any
