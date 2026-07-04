@@ -1,0 +1,9 @@
+{
+  "name": "thermal_aware_scheduler",
+  "type": "scheduler",
+  "version": "0.1.0",
+  "entry": "entrypoint.py",
+  "enabled": true,
+  "dependencies": ["comms"],
+  "description": "Prioritizes cooler nodes when selecting workers for tasks"
+}
