@@ -1,10 +1,11 @@
-FROM nvidia/cuda:12.4-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
 # System dependencies
 RUN apt-get update && apt-get install -y \
     curl git build-essential autoconf automake libtool pkg-config \
     libcurl4-openssl-dev libjansson-dev libudev-dev \
     ocl-icd-opencl-dev clinfo nvidia-opencl-icd \
+    python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # Build BFGMiner from source
@@ -20,7 +21,7 @@ WORKDIR /app
 
 # Python orchestration layer
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY miner_worker.py .
-CMD ["python", "miner_worker.py"]
+CMD ["python3", "miner_worker.py"]
