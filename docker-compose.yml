@@ -1,8 +1,4 @@
-version: '3.8'
-
-# Aurora Swarm BTC - Control Plane
-# Run this on your main host (e.g. one G6 Mini)
-# Workers can run on this host or other machines
+# Aurora Swarm BTC - Control Plane (single host)
 
 services:
   redis:
@@ -18,6 +14,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - aurora-net
 
   scheduler:
     build:
@@ -40,8 +38,8 @@ services:
       dockerfile: dashboard/Dockerfile
     container_name: aurora-dashboard
     ports:
-      - "8000:8000"   # Dashboard UI
-      - "8001:8001"   # API
+      - "8000:8000"
+      - "8001:8001"
     depends_on:
       redis:
         condition: service_healthy

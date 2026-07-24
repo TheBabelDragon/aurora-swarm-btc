@@ -2,7 +2,6 @@ FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies (packages that exist on Ubuntu 22.04 / CUDA runtime base)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -23,18 +22,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Build BFGMiner from source
-RUN git clone https://github.com/luke-jr/bfgminer.git /bfgminer \
+# BFGMiner submodules still use git:// which often times out.
+# Rewrite to HTTPS before clone.
+RUN git config --global url."https://github.com/".insteadOf git://github.com/ \
+    && git config --global url."https://".insteadOf git:// \
+    && git clone --recursive https://github.com/luke-jr/bfgminer.git /bfgminer \
     && cd /bfgminer \
     && ./autogen.sh \
     && ./configure --enable-scrypt --enable-opencl --enable-bfgminer \
-    && make -j$(nproc) \
+    && make -j"$(nproc)" \
     && make install \
-    && ldconfig
+    && ldconfig \
+    && bfgminer --version
 
 WORKDIR /app
 
-# Build context is repo root
 COPY worker/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
