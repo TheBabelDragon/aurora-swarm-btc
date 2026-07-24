@@ -1,8 +1,10 @@
-version: '3.8'
-
-# Aurora Swarm BTC - Worker Plane
-# Run this on worker hosts (e.g. your second G6 Mini or additional machines)
-# Make sure REDIS_URL points to your control host
+# Aurora Swarm BTC - Worker Plane (single-machine friendly)
+# Uses host networking so REDIS_URL=redis://127.0.0.1:6379/0 works.
+#
+# Usage:
+#   docker compose -f docker-compose.worker.yml up -d --build
+#   docker compose -f docker-compose.worker.yml logs -f
+#   docker compose -f docker-compose.worker.yml down
 
 services:
   worker:
@@ -10,8 +12,9 @@ services:
       context: .
       dockerfile: worker/Dockerfile
     container_name: aurora-worker
+    network_mode: host
     environment:
-      - REDIS_URL=${REDIS_URL:-redis://your-control-host:6379/0}
+      - REDIS_URL=${REDIS_URL:-redis://127.0.0.1:6379/0}
       - WORKER_NAME=${WORKER_NAME:-aurora-gpu1}
       - GPUS_PER_POD=${GPUS_PER_POD:-1}
       - INTENSITY=${INTENSITY:-19}
@@ -19,17 +22,3 @@ services:
       - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    # Uncomment if you need GPU access
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-    networks:
-      - aurora-net
-
-networks:
-  aurora-net:
-    driver: bridge
