@@ -5,6 +5,17 @@ import subprocess
 import re
 import signal
 import sys
+from pathlib import Path
+
+# Allow `python worker/miner_worker.py` from repo root OR host runs
+# where comms/ lives next to worker/
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+_APP = Path(__file__).resolve().parent
+if str(_APP) not in sys.path:
+    sys.path.insert(0, str(_APP))
+
 import prometheus_client as prom
 from comms.layer import CommsLayer
 
@@ -14,16 +25,15 @@ Aurora Swarm BTC - Production Miner Worker (Mesh-enabled + Useful Commands)
 Workers now fully participate in the mesh with proper type + capabilities.
 """
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("aurora-worker-mesh")
 
 comms = CommsLayer(node_id=os.getenv("WORKER_NAME", "aurora-gpu1"))
 
-# Prometheus
-HASH_RATE = prom.Gauge('aurora_worker_hashrate_ghs', 'Current hashrate GH/s')
-SHARES_ACCEPTED = prom.Counter('aurora_shares_accepted_total', 'Accepted shares')
-WORKER_STATUS = prom.Gauge('aurora_worker_status', 'Worker status')
-HEALTH = prom.Gauge('aurora_worker_health', 'Health status')
+HASH_RATE = prom.Gauge("aurora_worker_hashrate_ghs", "Current hashrate GH/s")
+SHARES_ACCEPTED = prom.Counter("aurora_shares_accepted_total", "Accepted shares")
+WORKER_STATUS = prom.Gauge("aurora_worker_status", "Worker status")
+HEALTH = prom.Gauge("aurora_worker_health", "Health status")
 
 GPUS_PER_POD = int(os.getenv("GPUS_PER_POD", "1"))
 WALLET = os.getenv("MINING_WALLET", "bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g")
@@ -38,17 +48,17 @@ current_intensity = INTENSITY
 
 
 def parse_hashrate(line: str) -> float:
-    match = re.search(r'(\d+\.?\d*)\s*(KH|MH|GH|TH)/s', line, re.IGNORECASE)
+    match = re.search(r"(\d+\.?\d*)\s*(KH|MH|GH|TH)/s", line, re.IGNORECASE)
     if match:
         rate = float(match.group(1))
         unit = match.group(2).upper()
-        multipliers = {'KH': 1e3, 'MH': 1e6, 'GH': 1e9, 'TH': 1e12}
+        multipliers = {"KH": 1e3, "MH": 1e6, "GH": 1e9, "TH": 1e12}
         return rate * multipliers.get(unit, 1.0)
     return 0.0
 
 
 def start_miner(intensity: str = None):
-    global miner_process, healthy, current_intensity
+    global miner_process, healthy, current_intensity, paused
     use_intensity = intensity or current_intensity
     current_intensity = use_intensity
 
@@ -61,14 +71,16 @@ def start_miner(intensity: str = None):
         "-S", "opencl:auto",
         "--intensity", str(use_intensity),
         "--api-listen",
-        "--quiet"
+        "--quiet",
     ]
     if GPUS_PER_POD > 1:
         cmd.extend(["--set", f"gpu_count={GPUS_PER_POD}"])
 
     logger.info(f"Starting bfgminer with intensity={use_intensity} ({GPUS_PER_POD} GPU(s))...")
     try:
-        miner_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        miner_process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
         WORKER_STATUS.set(1)
         HEALTH.set(1)
         healthy = True
@@ -139,34 +151,28 @@ def handle_mesh_command(msg):
 def shutdown_handler(signum, frame):
     logger.info("Shutdown signal received")
     stop_miner()
-    comms.close()
+    try:
+        comms.close()
+    except Exception:
+        pass
     sys.exit(0)
 
 
 def main():
+    global healthy
+
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
 
     prom.start_http_server(8000)
     logger.info(f"[MESH] Aurora Miner Worker started ({GPUS_PER_POD} GPU(s)) - joining comms mesh...")
 
-    # Join the mesh with proper type + capabilities
     comms.register_node(
         node_type="worker",
-        capabilities=[
-            "gpu_mining",
-            "intensity_control",
-            "pause_resume",
-            "restart"
-        ],
-        metadata={
-            "gpus": GPUS_PER_POD,
-            "pool": POOL_URL
-        }
+        capabilities=["gpu_mining", "intensity_control", "pause_resume", "restart"],
+        metadata={"gpus": GPUS_PER_POD, "pool": POOL_URL},
     )
     comms.heartbeat()
-
-    # Subscribe to commands directed at this node
     comms.subscribe(f"node:{comms.node_id}", handle_mesh_command)
 
     last_health_report = time.time()
@@ -192,13 +198,25 @@ def main():
 
                     if "accepted" in line.lower():
                         SHARES_ACCEPTED.inc()
-                        current = comms.get_state("cluster:shares_accepted", 0)
+                        current = comms.get_state("cluster:shares_accepted", 0) or 0
+                        try:
+                            current = int(current)
+                        except Exception:
+                            current = 0
                         comms.set_state("cluster:shares_accepted", current + 1)
 
                     now = time.time()
                     if now - last_health_report > 30:
-                        comms.heartbeat(metadata={"status": "mining" if healthy else "degraded", "intensity": current_intensity})
-                        comms.publish_event("worker_heartbeat", {"healthy": healthy, "intensity": current_intensity})
+                        comms.heartbeat(
+                            metadata={
+                                "status": "mining" if healthy else "degraded",
+                                "intensity": current_intensity,
+                            }
+                        )
+                        comms.publish_event(
+                            "worker_heartbeat",
+                            {"healthy": healthy, "intensity": current_intensity},
+                        )
                         last_health_report = now
 
                     if now - last_mesh_heartbeat > 15:
