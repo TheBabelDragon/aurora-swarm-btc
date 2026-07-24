@@ -19,9 +19,12 @@ RUN git clone https://github.com/luke-jr/bfgminer.git /bfgminer \
 
 WORKDIR /app
 
-# Python orchestration layer
-COPY requirements.txt .
+# Build context is repo root (see docker-compose.worker.yml).
+# Paths must be relative to that context.
+COPY worker/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY miner_worker.py .
+COPY worker/miner_worker.py .
+COPY comms/ ./comms/
+
 CMD ["python3", "miner_worker.py"]
