@@ -1,12 +1,15 @@
-# torrent_protocol Mod
+# torrent_protocol Mod  v0.2.0
 
 **Swarm-native piece distribution** inspired by BitTorrent, built entirely on top of the existing CommsLayer mesh.
 
 No external BitTorrent libraries. No trackers. No DHT. Just pure mesh P2P for large files.
 
-## Why?
+## What's new in 0.2.0
 
-When the swarm needs to distribute multi-hundred-MB assets (models, GPU binaries, big config packs, etc.) a central download quickly becomes a bottleneck. This mod turns every node that opts in into a potential seeder/leecher.
+- **Rarest-first** piece prioritization (local availability view)
+- **Parallel requests** with hard back-pressure (`max_outstanding`, default 12)
+- Pending-request tracking + automatic re-request on timeout
+- **Scheduler integration** via the `on_asset_needed` hook + `asset.needed` mesh event
 
 ## Quick Start
 
@@ -15,49 +18,50 @@ from comms.layer import CommsLayer
 from mods.torrent_protocol.torrent_manager import TorrentManager, register_torrent_capability
 
 comms = CommsLayer(node_id="worker-42")
-register_torrent_capability(comms)          # advertise "torrent" capability
+register_torrent_capability(comms)
 
-tm = TorrentManager(comms)
+tm = TorrentManager(comms)          # optional: max_outstanding=16
 
-# --- Seeder side ---
+# Seeder
 meta = tm.create_torrent("/path/to/big_model.pt")
 tm.announce(meta.infohash)
 
-# --- Leecher side (any other node) ---
-tm.start_download(meta.infohash)            # or just the infohash if already announced
-
-# Watch progress
+# Leecher
+tm.start_download(meta.infohash)
 print(tm.get_progress(meta.infohash))
 ```
 
-## How it works
+### Triggering a download from the scheduler
 
-1. **create_torrent** splits the file into 256 KiB pieces, computes SHA-256 hashes, and derives a deterministic infohash.
-2. **announce** publishes the metadata (name, size, piece hashes) onto the mesh and stores it in Redis for late joiners.
-3. **start_download** requests missing pieces from any node that has the "torrent" capability and currently holds those pieces.
-4. Pieces are verified on arrival. When all pieces are present the file is assembled on disk.
-5. The newly completed node can immediately serve pieces to others (natural swarming).
+```python
+from scheduler.hook_registry import registry
 
-## Message types used on the mesh
+# Anywhere in scheduler / control code:
+registry.run("on_asset_needed", {"infohash": "abc123...", "name": "big_model.pt"})
+```
+
+This publishes an `asset.needed` event. Every live TorrentManager will automatically call `start_download` if it does not already have the complete file.
+
+## How the pipeline works
+
+1. Missing pieces are ordered **rarest-first** using a simple availability counter.
+2. Up to `max_outstanding` pieces are requested in parallel.
+3. When a piece arrives (or times out) a new rarest piece is requested — the pipeline stays full without flooding the mesh.
+4. Completed downloaders immediately become seeders.
+
+## Message types
 
 - `torrent.announce`
 - `torrent.piece_request`
 - `torrent.piece_data`
+- `asset.needed`          ← new (scheduler / anyone)
 
 ## Storage
 
-Completed and in-progress torrents live under `$AURORA_TORRENT_DIR` (default `/tmp/aurora_torrents`).
+`$AURORA_TORRENT_DIR` (default `/tmp/aurora_torrents`)
 
 ## Status
 
-v0.1.0 — experimental but functional prototype.
+v0.2.0 — solid experimental foundation with the three most requested improvements.
 
-Future ideas:
-- Piece prioritization / rarest-first
-- Parallel requests with back-pressure
-- Integration with the scheduler so "on_asset_needed" automatically triggers a download
-- Optional real BitTorrent fallback (libtorrent) for external magnets
-
-## Development Rules
-
-Same as all other mods: keep experiments here, promote to core only after proven stability.
+Still experimental. Promote to core only after real-world soak testing.

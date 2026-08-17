@@ -1,17 +1,16 @@
 """torrent_protocol Mod Entrypoint
 
-Registers the torrent capability helpers and any relevant hooks.
+Registers hooks so the rest of the swarm can trigger asset downloads
+without knowing the internals of the torrent manager.
 """
 
 from scheduler.hook_registry import registry
+from .hooks.on_asset_needed import on_asset_needed
 
-# The manager itself is imported by workers / other components as needed.
-# We keep the entrypoint lightweight so the mod can be loaded by any node type.
 
 def register():
-    # Future: register hooks here if we add torrent-specific scheduling logic
-    # e.g. registry.register("on_asset_needed", on_asset_needed)
-    print("[MOD] torrent_protocol registered — swarm-native piece distribution ready")
+    registry.register("on_asset_needed", on_asset_needed)
+    print("[MOD] torrent_protocol v0.2.0 registered — rarest-first + on_asset_needed ready")
 
 
 if __name__ == "__main__":
