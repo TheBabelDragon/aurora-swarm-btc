@@ -8,6 +8,7 @@ This directory contains all experimental and pluggable behavior for the swarm.
 
 - `thermal_aware_scheduler` — Prioritizes cooler nodes
 - `gpu_utilization_balancer` — Avoids highly utilized GPUs
+- `torrent_protocol` — In-mesh BitTorrent-inspired piece distribution for large assets
 
 ## Mod Structure
 
