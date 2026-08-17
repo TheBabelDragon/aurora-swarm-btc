@@ -1,9 +1,9 @@
 {
   "name": "torrent_protocol",
   "type": "comms",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "entry": "entrypoint.py",
   "enabled": true,
   "dependencies": ["comms"],
-  "description": "Foolproof in-mesh BitTorrent-inspired piece distribution with rarest-first, back-pressure, resume, and scheduler integration"
+  "description": "Maximum-resilience in-mesh piece distribution with background retry, stall recovery, and full foolproofing"
 }

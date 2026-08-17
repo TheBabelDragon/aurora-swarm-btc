@@ -1,16 +1,16 @@
 """
-Aurora Swarm Torrent Manager  v0.3.0 — Foolproof edition
--------------------------------------------------------
+Aurora Swarm Torrent Manager  v0.4.0 — Maximum Resilience
+---------------------------------------------------------
 Lightweight, mesh-native piece distribution inspired by BitTorrent.
 
-Hardened for real swarm conditions:
-- Resume after process restart (incremental piece files + have-set)
-- ensure_asset() one-call safe API
-- Input validation, path sanitization, size limits
-- Exponential backoff on re-requests
-- Graceful degradation when metadata is temporarily missing
-- Memory hygiene (drop in-memory piece buffers after completion)
-- Never raises into the host process for normal operational failures
+This version adds the final layer of unattended reliability:
+
+- Persistent "wanted" set — once you ask for an asset we keep trying
+- Background maintenance thread (safe, daemon, stoppable)
+- Automatic meta re-fetch when announcements are late
+- Stall detection + forced pipeline recovery
+- Delayed retry for asset.needed events
+- Everything from 0.3.0 (resume, ensure_asset, validation, backoff, etc.)
 
 Still pure Python + existing CommsLayer. No external BitTorrent stack.
 """
@@ -21,6 +21,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -35,9 +36,14 @@ DEFAULT_PIECE_SIZE = 256 * 1024
 MAX_OUTSTANDING = 12
 REQUEST_TIMEOUT = 20.0
 MAX_BACKOFF = 120.0
-MAX_PIECES = 50_000          # hard safety limit (~12.5 GB at 256 KiB)
-MAX_FILE_SIZE = 32 * 1024**3  # 32 GiB absolute ceiling
+MAX_PIECES = 50_000
+MAX_FILE_SIZE = 32 * 1024**3
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9._\- ]{1,200}$")
+
+# Resilience tuning
+MAINT_INTERVAL = 8.0          # seconds between background ticks
+STALL_SECONDS = 90.0          # no progress for this long → force recovery
+META_RETRY_SECONDS = 15.0     # how often to re-ask for missing meta
 
 
 @dataclass
@@ -81,7 +87,7 @@ class TorrentMeta:
 
 class TorrentManager:
     """
-    Foolproof torrent manager for a single Aurora node.
+    Maximum-resilience torrent manager for a single Aurora node.
     """
 
     def __init__(
@@ -89,6 +95,7 @@ class TorrentManager:
         comms: CommsLayer,
         storage_dir: Optional[str] = None,
         max_outstanding: int = MAX_OUTSTANDING,
+        auto_maintain: bool = True,
     ):
         self.comms = comms
         self.node_id = comms.node_id
@@ -98,11 +105,16 @@ class TorrentManager:
 
         self.torrents: Dict[str, TorrentMeta] = {}
         self.have: Dict[str, Set[int]] = {}
-        self.pieces: Dict[str, Dict[int, bytes]] = {}  # only kept while downloading
+        self.pieces: Dict[str, Dict[int, bytes]] = {}
 
         self.rarity: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
-        self.pending: Dict[str, Dict[int, float]] = defaultdict(dict)  # idx → last_request_ts
-        self.backoff: Dict[str, Dict[int, float]] = defaultdict(dict)  # idx → current_backoff
+        self.pending: Dict[str, Dict[int, float]] = defaultdict(dict)
+        self.backoff: Dict[str, Dict[int, float]] = defaultdict(dict)
+
+        # Resilience state
+        self.wanted: Set[str] = set()                     # infohashes we must eventually get
+        self.last_progress: Dict[str, float] = {}         # infohash → last time we gained a piece
+        self.last_meta_attempt: Dict[str, float] = {}     # infohash → last meta fetch try
 
         self.on_complete: Optional[Callable[[str, Path], None]] = None
         self.on_progress: Optional[Callable[[str, int, int], None]] = None
@@ -113,13 +125,89 @@ class TorrentManager:
         self.comms.subscribe("torrent.piece_data", self._on_piece_data)
         self.comms.subscribe("asset.needed", self._on_asset_needed)
 
-        # Resume anything we previously started
         self._resume_from_disk()
 
+        # Background maintainer
+        self._stop_event = threading.Event()
+        self._maint_thread: Optional[threading.Thread] = None
+        if auto_maintain:
+            self.start_maintainer()
+
         logger.info(
-            f"TorrentManager v0.3.0 (foolproof) ready on node={self.node_id} "
+            f"TorrentManager v0.4.0 (max resilience) ready on node={self.node_id} "
             f"max_outstanding={self.max_outstanding} storage={self.storage_dir}"
         )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def start_maintainer(self):
+        if self._maint_thread and self._maint_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._maint_thread = threading.Thread(
+            target=self._maint_loop, name="torrent-maint", daemon=True
+        )
+        self._maint_thread.start()
+        logger.debug("Background maintainer started")
+
+    def stop(self):
+        """Cleanly stop the background maintainer."""
+        self._stop_event.set()
+        if self._maint_thread and self._maint_thread.is_alive():
+            self._maint_thread.join(timeout=5.0)
+        logger.debug("Background maintainer stopped")
+
+    def _maint_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                self._maintenance_tick()
+            except Exception as e:
+                logger.warning(f"Maintenance tick error: {e}")
+            self._stop_event.wait(MAINT_INTERVAL)
+
+    def _maintenance_tick(self):
+        now = time.time()
+
+        # 1. Retry meta for wanted torrents that we still don't have
+        for infohash in list(self.wanted):
+            if infohash in self.torrents:
+                continue
+            last = self.last_meta_attempt.get(infohash, 0)
+            if now - last >= META_RETRY_SECONDS:
+                self.last_meta_attempt[infohash] = now
+                meta = self._fetch_meta(infohash, retries=1)
+                if meta:
+                    logger.info(f"Meta finally arrived for wanted {infohash[:12]}… — starting")
+                    self.start_download(infohash, meta=meta)
+
+        # 2. Stall detection + recovery for active downloads
+        for infohash in list(self.wanted):
+            if self.is_complete(infohash):
+                self.wanted.discard(infohash)
+                continue
+            if infohash not in self.torrents:
+                continue
+
+            last = self.last_progress.get(infohash, 0)
+            if last == 0:
+                self.last_progress[infohash] = now  # first time we see it
+                continue
+
+            if now - last > STALL_SECONDS:
+                logger.info(f"Stall detected on {infohash[:12]}… — forcing recovery")
+                # Soft-clear backoffs so rarest-first can try again immediately
+                self.backoff[infohash].clear()
+                # Drop very old pending so we can re-request
+                self.pending[infohash].clear()
+                self._fill_pipeline(infohash)
+                self.last_progress[infohash] = now  # prevent tight loop
+
+        # 3. Keep pipelines full even without new events
+        for infohash in list(self.wanted):
+            if infohash in self.torrents and not self.is_complete(infohash):
+                self._fill_pipeline(infohash)
 
     # ------------------------------------------------------------------
     # Public foolproof API
@@ -133,13 +221,6 @@ class TorrentManager:
         name: Optional[str] = None,
         announce: bool = True,
     ) -> Optional[str]:
-        """
-        One-call safe entry point.
-
-        - If `source` is an existing local file → create + optionally announce.
-        - If `infohash` is given → start/resume download.
-        - Returns the infohash on success, None on failure (never raises).
-        """
         try:
             if source is not None:
                 path = Path(source)
@@ -152,8 +233,9 @@ class TorrentManager:
                 return None
 
             if infohash:
+                self.wanted.add(str(infohash).strip().lower())
                 ok = self.start_download(infohash)
-                return infohash if ok else None
+                return infohash if ok else infohash  # still return it — we will keep trying
 
             logger.warning("ensure_asset called with neither source nor infohash")
             return None
@@ -212,7 +294,6 @@ class TorrentManager:
         for idx in range(len(piece_hashes)):
             self.rarity[infohash][idx] = max(self.rarity[infohash][idx], 1)
 
-        # Persist complete file + meta
         self._write_complete_file(infohash, data)
         self._write_meta(infohash, meta)
 
@@ -239,32 +320,35 @@ class TorrentManager:
             return False
 
     def start_download(self, infohash: str, meta: Optional[TorrentMeta] = None) -> bool:
-        """Start or resume a download. Returns True if work was started/resumed."""
         infohash = str(infohash).strip().lower()
         if not re.fullmatch(r"[0-9a-f]{16,64}", infohash):
             logger.warning(f"start_download: invalid infohash format: {infohash}")
             return False
 
+        self.wanted.add(infohash)
+
         if self.is_complete(infohash):
             logger.info(f"Already complete: {infohash[:12]}")
+            self.wanted.discard(infohash)
             return True
 
         if meta is None:
             meta = self._fetch_meta(infohash)
             if meta is None:
-                logger.warning(f"No metadata for {infohash[:12]} — will retry later if announced")
+                self.last_meta_attempt[infohash] = time.time()
+                logger.info(f"No metadata yet for {infohash[:12]} — added to wanted set (will retry)")
                 return False
 
-        # Validate meta sanity
         if len(meta.piece_hashes) > MAX_PIECES or meta.size > MAX_FILE_SIZE:
             logger.error(f"Rejecting insane torrent {infohash[:12]}")
+            self.wanted.discard(infohash)
             return False
 
         self.torrents[infohash] = meta
         self.have.setdefault(infohash, set())
         self.pieces.setdefault(infohash, {})
+        self.last_progress.setdefault(infohash, time.time())
 
-        # Load any pieces we already have on disk
         self._load_partial_pieces(infohash)
 
         missing = set(range(len(meta.piece_hashes))) - self.have[infohash]
@@ -279,7 +363,6 @@ class TorrentManager:
     def is_complete(self, infohash: str) -> bool:
         meta = self.torrents.get(infohash)
         if not meta:
-            # Check disk
             path = self._complete_path(infohash)
             return path is not None and path.exists()
         return len(self.have.get(infohash, set())) == len(meta.piece_hashes)
@@ -291,7 +374,7 @@ class TorrentManager:
     def get_progress(self, infohash: str) -> Dict[str, Any]:
         meta = self.torrents.get(infohash)
         if not meta:
-            return {"error": "unknown torrent", "infohash": infohash}
+            return {"error": "unknown torrent", "infohash": infohash, "wanted": infohash in self.wanted}
         have = len(self.have.get(infohash, set()))
         total = len(meta.piece_hashes)
         pending = len(self.pending.get(infohash, {}))
@@ -303,10 +386,12 @@ class TorrentManager:
             "pending": pending,
             "percent": round(100.0 * have / total, 1) if total else 0.0,
             "complete": have == total,
+            "wanted": infohash in self.wanted,
         }
 
     def list_torrents(self) -> List[Dict[str, Any]]:
-        return [self.get_progress(h) for h in list(self.torrents.keys())]
+        keys = set(self.torrents.keys()) | self.wanted
+        return [self.get_progress(h) for h in keys]
 
     # ------------------------------------------------------------------
     # Internal helpers — safety & persistence
@@ -315,7 +400,6 @@ class TorrentManager:
     def _safe_name(self, name: str) -> str:
         name = name.strip().replace("/", "_").replace("\\", "_")
         if not SAFE_NAME_RE.match(name):
-            # Fallback to a hash-based name
             return "asset_" + hashlib.sha256(name.encode()).hexdigest()[:16]
         return name
 
@@ -328,7 +412,6 @@ class TorrentManager:
     def _complete_path(self, infohash: str, name: Optional[str] = None) -> Optional[Path]:
         if name:
             return self.storage_dir / f"{infohash}_{name}"
-        # Search for any matching complete file
         for p in self.storage_dir.glob(f"{infohash}_*"):
             if p.is_file() and not p.name.endswith(".meta.json") and ".piece." not in p.name:
                 return p
@@ -368,7 +451,6 @@ class TorrentManager:
                     p.unlink(missing_ok=True)
 
     def _resume_from_disk(self):
-        """On startup, rebuild state from any .meta.json + piece files."""
         import json
         for meta_file in self.storage_dir.glob("*.meta.json"):
             try:
@@ -379,13 +461,16 @@ class TorrentManager:
                 self.have.setdefault(infohash, set())
                 self._load_partial_pieces(infohash)
 
-                # If we already have a complete file, mark fully done
                 complete = self._complete_path(infohash, meta.name)
                 if complete and complete.exists() and complete.stat().st_size == meta.size:
                     self.have[infohash] = set(range(len(meta.piece_hashes)))
-                    # Drop piece files to save disk
                     for idx in range(len(meta.piece_hashes)):
                         self._piece_path(infohash, idx).unlink(missing_ok=True)
+                else:
+                    # Still incomplete → keep it in the wanted set
+                    self.wanted.add(infohash)
+                    self.last_progress[infohash] = time.time()
+
                 logger.info(f"Resumed state for {infohash[:12]}… have={len(self.have[infohash])}")
             except Exception as e:
                 logger.warning(f"Skipping corrupt meta {meta_file.name}: {e}")
@@ -399,11 +484,12 @@ class TorrentManager:
                 except Exception as e:
                     logger.warning(f"Bad meta for {infohash[:12]}: {e}")
                     return None
-            time.sleep(0.3 * (attempt + 1))
+            if attempt < retries - 1:
+                time.sleep(0.25 * (attempt + 1))
         return None
 
     # ------------------------------------------------------------------
-    # Pipeline (rarest-first + back-pressure + backoff)
+    # Pipeline
     # ------------------------------------------------------------------
 
     def _rarest_missing(self, infohash: str) -> List[int]:
@@ -417,7 +503,6 @@ class TorrentManager:
         for idx in range(len(meta.piece_hashes)):
             if idx in have or idx in pending:
                 continue
-            # Honour backoff
             if now < self.backoff[infohash].get(idx, 0):
                 continue
             count = rarity.get(idx, 0)
@@ -445,10 +530,8 @@ class TorrentManager:
         stale = [idx for idx, ts in list(pending.items()) if now - ts > REQUEST_TIMEOUT]
         for idx in stale:
             del pending[idx]
-            # Exponential backoff
             prev = self.backoff[infohash].get(idx, REQUEST_TIMEOUT)
             self.backoff[infohash][idx] = now + min(prev * 1.7, MAX_BACKOFF)
-            logger.debug(f"Timed out piece {idx} of {infohash[:12]}… backoff applied")
 
     def _request_piece(self, infohash: str, piece_index: int):
         self.pending[infohash][piece_index] = time.time()
@@ -464,7 +547,7 @@ class TorrentManager:
             self.pending[infohash].pop(piece_index, None)
 
     # ------------------------------------------------------------------
-    # Mesh handlers (all defensive)
+    # Mesh handlers
     # ------------------------------------------------------------------
 
     def _on_announce(self, msg: SwarmMessage):
@@ -479,6 +562,14 @@ class TorrentManager:
             num = payload.get("num_pieces") or len(payload.get("piece_hashes", []))
             for idx in range(int(num)):
                 self.rarity[infohash][idx] += 1
+
+            # If this was a wanted torrent we were waiting on, start it
+            if infohash in self.wanted and infohash not in self.torrents:
+                try:
+                    meta = TorrentMeta.from_dict(payload)
+                    self.start_download(infohash, meta=meta)
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"_on_announce error: {e}")
 
@@ -497,7 +588,6 @@ class TorrentManager:
 
             piece_data = self.pieces.get(infohash, {}).get(idx)
             if piece_data is None:
-                # Try disk
                 p = self._piece_path(infohash, idx)
                 if p.exists():
                     piece_data = p.read_bytes()
@@ -569,11 +659,13 @@ class TorrentManager:
                 self._fill_pipeline(infohash)
                 return
 
-            # Accept
             self.pieces.setdefault(infohash, {})[idx] = data
             self.have.setdefault(infohash, set()).add(idx)
             self.rarity[infohash][idx] += 1
             self._write_piece(infohash, idx, data)
+
+            # Progress tracking for stall detection
+            self.last_progress[infohash] = time.time()
 
             have_count = len(self.have[infohash])
             total = len(meta.piece_hashes)
@@ -600,6 +692,8 @@ class TorrentManager:
                 return
             if self.is_complete(infohash):
                 return
+            # Always add to wanted — even if start_download fails right now
+            self.wanted.add(str(infohash).strip().lower())
             self.start_download(infohash)
         except Exception as e:
             logger.debug(f"_on_asset_needed error: {e}")
@@ -614,16 +708,14 @@ class TorrentManager:
                 logger.error(f"Size mismatch on assemble {infohash[:12]}")
                 return
 
-            # Final hash check of whole file is optional but nice
             path = self.storage_dir / f"{infohash}_{meta.name}"
             path.write_bytes(ordered)
 
-            # Memory hygiene
             self.pieces.pop(infohash, None)
             self.pending.pop(infohash, None)
             self.backoff.pop(infohash, None)
+            self.wanted.discard(infohash)
 
-            # Clean individual piece files
             for idx in range(len(meta.piece_hashes)):
                 self._piece_path(infohash, idx).unlink(missing_ok=True)
 
@@ -645,7 +737,7 @@ def register_torrent_capability(comms: CommsLayer, extra_caps: Optional[List[str
         comms.register_node(
             node_type="worker",
             capabilities=caps,
-            metadata={"torrent_version": "0.3.0"},
+            metadata={"torrent_version": "0.4.0"},
         )
         logger.info(f"Registered torrent capability on {comms.node_id}")
     except Exception as e:
