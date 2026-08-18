@@ -1,9 +1,9 @@
 {
   "name": "btc_anchor",
   "type": "comms",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "entrypoint.py",
   "enabled": true,
   "dependencies": ["comms", "asset_fabric"],
-  "description": "Optional Bitcoin-style attestation for Asset Fabric manifests. Creates content commitments and records them on the mesh; on-chain broadcast is a deliberate extension point."
+  "description": "Bitcoin attestation for Asset Fabric: commitments, mesh records, broadcast queue, pluggable OP_RETURN writer"
 }

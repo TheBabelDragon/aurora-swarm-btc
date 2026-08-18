@@ -1,65 +1,61 @@
-# btc_anchor  v0.1.0
+# btc_anchor  v0.2.0
 
-**Optional attestation layer for Asset Fabric**
+**Bitcoin attestation path for Asset Fabric**
 
-Bitcoin is used here as a *settlement / truth* surface, not as the data plane.
+Bitcoin is the *settlement / truth* surface. The swarm data plane stays off-chain.
 
-## What this does today
-
-1. Builds a **deterministic content commitment** over an `AssetManifest`
-2. Records that commitment on the **mesh** (`asset:anchor:<id>`)
-3. Publishes an `asset.anchored` event
-4. Lets any node (or the dashboard) query anchor status
-
-## What this deliberately does *not* do yet
-
-- Broadcast a real Bitcoin transaction
-- Require wallet keys or fees
-
-Those are explicit extension points (`mark_broadcast`, future broadcaster process).
-
-## Why start here
+## Pipeline
 
 ```
-AssetFabric.publish / ensure
-        │
-        ▼
-   AssetManifest  ──►  commitment  ──►  mesh record  ──►  (later) on-chain
+AssetManifest
+    → commitment (SHA-256 canonical fields)
+    → mesh AnchorRecord          (always)
+    → BroadcastQueue             (optional)
+    → Broadcaster                (log | null | future wallet)
+    → mark_broadcast(txid)       (upgrade status)
 ```
 
-The swarm already has collective memory.  
-This adds an optional path for selected memories to gain public, scarce attestation.
+## On-chain payload (v1)
+
+OP_RETURN short form (24 bytes):
+
+```
+AURORA1|<16-hex commitment prefix>
+```
+
+Full indexer form is available off-chain via `payload.full_record_json`.
 
 ## Usage
 
 ```python
 from mods.btc_anchor.anchor import AssetAnchor
-from mods.asset_fabric.fabric import AssetFabric
 
-fabric = AssetFabric(comms)
 anchor = AssetAnchor(comms)
 
-asset_id = fabric.publish("/path/to/model.pt", asset_type="model")
-manifest = fabric.get_manifest(asset_id)
-
+# Mesh attestation only
 rec = anchor.anchor_manifest(manifest)
-print(rec.commitment, rec.status)
 
-# Later, after a real broadcast:
-# anchor.mark_broadcast(asset_id, txid="...", method="op_return")
+# Mesh + enqueue for broadcast
+rec = anchor.anchor_manifest(manifest, request_broadcast=True)
+
+# Or later:
+anchor.request_broadcast(asset_id)
+anchor.process_queue()   # runs LogBroadcaster / Null / future writer
 ```
 
-## Commitment
+## Config
 
-SHA-256 over a canonical JSON of:
+| Env | Meaning |
+|-----|--------|
+| `AURORA_BTC_ANCHOR_BROADCAST=1` | Prefer LogBroadcaster when mode unset |
+| `AURORA_BTC_BROADCASTER=log\|null` | Explicit writer |
+| `AURORA_BTC_NETWORK=signet\|testnet\|mainnet` | Label for records |
 
-- asset_id / content_hash
-- size, piece_size, piece_hashes
-- asset_type, schema_version
+## Extending to real Bitcoin
 
-Cosmetic fields do not affect the commitment unless placed in provenance deliberately.
+Implement `Broadcaster.broadcast(record) -> BroadcastResult` with a wallet/RPC,
+return a real `txid`, and `process_queue` / `mark_broadcast` will upgrade the mesh record to `confirmed`.
 
 ## Status
 
-v0.1.0 — mesh attestation + clean on-chain extension point.  
-Still experimental (`mods/`). Promote only after a real broadcaster exists and has soaked.
+v0.2.0 — full path through queue + pluggable writer. Log writer proves payload shape. Real chain writer still a deliberate next plug-in.
