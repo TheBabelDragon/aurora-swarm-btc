@@ -1,51 +1,19 @@
-"""Replace /status with live mining-aware swarm status."""
+"""Replace /status with live mining-aware swarm status — no fake 0 H/s."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+import math
+from typing import Any, Optional
 
 logger = logging.getLogger("aurora-dashboard.status_live")
 
 
-def _aggregate_hashrate_hs(comms: Any, local: dict) -> float:
-    total = float(local.get("hashrate_hs") or 0.0)
-    if total <= 0 and local.get("hashrate_ghs"):
-        total = float(local["hashrate_ghs"]) * 1e9
-    try:
-        from mods.mining_engine.coordinator import MiningCoordinator
-
-        fleet = MiningCoordinator(comms).fleet_view()
-        for w in fleet.get("workers") or []:
-            hs = w.get("hashrate_hs")
-            if hs is None and w.get("hashrate_ghs") is not None:
-                hs = float(w["hashrate_ghs"]) * 1e9
-            if hs:
-                # avoid double-count local if same worker_id
-                if w.get("worker_id") and w.get("worker_id") == local.get("worker_id"):
-                    continue
-                total += float(hs)
-    except Exception:
-        pass
-    # also scan per-node keys
-    try:
-        for n in comms.get_active_nodes() or []:
-            if not isinstance(n, dict):
-                continue
-            nid = n.get("node_id") or ""
-            st = comms.get_state(f"worker:{nid}:hashrate")
-            if isinstance(st, dict):
-                hs = st.get("hashrate_hs")
-                if hs is None and st.get("hashrate_ghs") is not None:
-                    hs = float(st["hashrate_ghs"]) * 1e9
-                if hs:
-                    total = max(total, float(hs))  # max avoids crude double count
-    except Exception:
-        pass
-    return float(total)
-
-
-def _format_rate(hs: float) -> str:
+def _format_rate(hs: float, *, running: bool = False, starting: bool = False) -> str:
+    if starting and hs <= 0:
+        return "warming up…"
+    if not running and hs <= 0:
+        return "idle"
     if hs >= 1e12:
         return f"{hs/1e12:.3f} TH/s"
     if hs >= 1e9:
@@ -56,17 +24,50 @@ def _format_rate(hs: float) -> str:
         return f"{hs/1e3:.2f} KH/s"
     if hs > 0:
         return f"{hs:.0f} H/s"
-    return "0 H/s"
+    return "measuring…" if running else "idle"
 
 
-def install_status_live(
-    app: Any,
-    *,
-    get_comms: Callable[[], Any],
-    bus: Any = None,
-):
+def _aggregate_hashrate_hs(comms: Any, local: dict) -> float:
+    total = float(local.get("hashrate_hs") or 0.0)
+    if total <= 0 and local.get("hashrate_ghs"):
+        total = float(local["hashrate_ghs"]) * 1e9
+    seen = {comms.node_id}
     try:
-        app.router.routes = [
+        for w in comms.get_workers() or []:
+            nid = w.get("node_id") or w.get("id")
+            hs = w.get("hashrate_hs")
+            if hs is None and w.get("hashrate_ghs") is not None:
+                hs = float(w["hashrate_ghs"]) * 1e9
+            if hs and nid not in seen:
+                total += float(hs)
+                seen.add(nid)
+    except Exception:
+        pass
+    try:
+        for n in comms.get_active_nodes() or []:
+            nid = n.get("node_id") or ""
+            if nid in seen:
+                continue
+            meta = n.get("metadata") or {}
+            hs = meta.get("hashrate_hs")
+            if hs is None:
+                st = comms.get_state(f"worker:{nid}:hashrate")
+                if isinstance(st, dict):
+                    hs = st.get("hashrate_hs")
+                    if hs is None and st.get("hashrate_ghs") is not None:
+                        hs = float(st["hashrate_ghs"]) * 1e9
+            if hs:
+                total += float(hs)
+                seen.add(nid)
+    except Exception:
+        pass
+    return float(total)
+
+
+def install_status_live(app: Any, *, get_comms, bus: Optional[Any] = None):
+    # prune prior /status if present
+    try:
+        app.router.routes[:] = [
             r
             for r in app.router.routes
             if not (
@@ -86,20 +87,21 @@ def install_status_live(
 
             local = local_status(comms) or {}
         except Exception as e:
-            local = {"error": str(e)}
+            local = {"error": str(e), "running": False}
+
+        running = bool(local.get("running"))
+        engine_built = bool(local.get("engine_built") or local.get("backend"))
+        hs_local = float(local.get("hashrate_hs") or 0)
+        starting = running and hs_local <= 0
 
         hs = _aggregate_hashrate_hs(comms, local)
         ghs = hs / 1e9
         ths = hs / 1e12
 
-        # entropy: soft activity score from hashrate + running flag
         entropy = 0.0
-        if local.get("running"):
+        if running:
             entropy = 1.5
         if hs > 0:
-            # log-ish scale so CPU MH/s still moves the needle
-            import math
-
             entropy = max(entropy, min(5.0, 1.0 + math.log10(max(hs, 1.0)) / 2.0))
 
         try:
@@ -107,8 +109,18 @@ def install_status_live(
                 bus.set("cluster:total_hashrate_btc", ths)
                 bus.set("cluster:total_hashrate_hs", hs)
                 bus.set("entropy", entropy)
+            # publish local rate for mesh aggregation
+            if running or hs_local > 0:
+                comms.set_state(
+                    f"worker:{comms.node_id}:hashrate",
+                    {
+                        "hashrate_hs": hs_local,
+                        "hashrate_display": _format_rate(hs_local, running=running, starting=starting),
+                        "running": running,
+                    },
+                    expire=120,
+                )
             comms.set_state("cluster:total_hashrate_hs", hs)
-            comms.set_state("cluster:total_hashrate_ghs", ghs)
             comms.set_state("entropy", entropy)
         except Exception:
             pass
@@ -119,23 +131,36 @@ def install_status_live(
         except Exception:
             pass
 
+        display = _format_rate(hs, running=running or hs > 0, starting=starting and hs <= 0)
+        local_display = _format_rate(hs_local, running=running, starting=starting)
+
+        mood = "Idle"
+        if starting:
+            mood = "Warming up"
+        elif hs > 0 or running:
+            mood = "THEY YEARN FOR THE MINES" if entropy > 2.5 else "Hashing"
+
         return {
             "status": "healthy",
             "entropy": round(entropy, 3),
             "total_ths": round(ths, 6),
             "total_ghs": round(ghs, 6),
             "total_hs": round(hs, 2),
-            "hashrate_display": _format_rate(hs),
+            "hashrate_display": display,
             "mining": {
-                "running": bool(local.get("running")),
-                "backend": local.get("backend"),
+                "running": running,
+                "starting": starting,
+                "engine_built": engine_built,
+                "backend": local.get("backend") or "cpu_stratum",
                 "wallet": (local.get("wallet") or "")[:16] + ("…" if local.get("wallet") else ""),
-                "hashrate_display": local.get("hashrate_display") or _format_rate(float(local.get("hashrate_hs") or 0)),
+                "hashrate_hs": hs_local,
+                "hashrate_display": local_display,
+                "error": local.get("error") or "",
             },
             "active_workers": len(workers),
             "current_coin": "BTC",
-            "mood": "THEY YEARN FOR THE MINES" if entropy > 2.5 else ("Hashing" if hs > 0 or local.get("running") else "Idle"),
-            "message": "Live mining telemetry · Asset Fabric · BVL · attestation",
+            "mood": mood,
+            "message": "Live mining telemetry · shared mesh chat · BVL",
             "comms_nodes_registered": len(comms.get_active_nodes() or []),
         }
 
