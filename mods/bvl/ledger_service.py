@@ -1,10 +1,8 @@
 """
 Babel Value Ledger — public service API.
 
-BVL is mesh-native swarm credit:
-  mint  → earn for useful work (seed, attest, uptime)
-  transfer → peer to peer on the mesh
-  burn / settle → optional bridge into ln_tips (sats)
+Minting is intended for system processes (EconomyReactor), not arbitrary HTTP.
+Each (reason, node, asset) claim is granted at most once.
 """
 
 from __future__ import annotations
@@ -33,6 +31,27 @@ class BabelLedger:
 
     def supply(self) -> float:
         return self.ledger.get_supply()
+
+    def _claim_key(self, reason: str, node_id: str, asset_id: str) -> str:
+        return f"bvl:claim:{reason}:{node_id}:{asset_id}"
+
+    def _already_claimed(self, reason: str, node_id: str, asset_id: str) -> bool:
+        if not asset_id:
+            return True  # refuse mint without asset binding
+        try:
+            return bool(self.comms.get_state(self._claim_key(reason, node_id, asset_id)))
+        except Exception:
+            return False
+
+    def _mark_claimed(self, reason: str, node_id: str, asset_id: str) -> None:
+        try:
+            self.comms.set_state(
+                self._claim_key(reason, node_id, asset_id),
+                {"ts": time.time(), "reason": reason, "node_id": node_id, "asset_id": asset_id},
+                expire=0,
+            )
+        except Exception as e:
+            logger.warning(f"claim mark failed: {e}")
 
     def _credit(self, node_id: str, amount: float, reason: str, meta: Optional[Dict] = None) -> Dict[str, Any]:
         if amount <= 0:
@@ -89,31 +108,65 @@ class BabelLedger:
         except Exception:
             pass
 
-    def reward_seed(self, node_id: Optional[str] = None, asset_id: str = "", amount: Optional[float] = None) -> Dict[str, Any]:
+    def reward_seed(
+        self,
+        node_id: Optional[str] = None,
+        asset_id: str = "",
+        amount: Optional[float] = None,
+        *,
+        force_system: bool = False,
+    ) -> Dict[str, Any]:
+        """System mint for holding/completing an asset. Idempotent per node+asset."""
+        nid = node_id or self.node_id
+        asset_id = (asset_id or "").strip()
+        if not asset_id:
+            return {"ok": False, "error": "asset_id required for seed mint"}
+        if self._already_claimed("seed_hold", nid, asset_id):
+            return {"ok": False, "error": "already claimed", "reason": "seed_hold", "asset_id": asset_id, "to": nid}
         amt = amount if amount is not None else self.policy.seed_hold
-        return self._credit(
-            node_id or self.node_id,
-            amt,
-            reason="seed_hold",
-            meta={"asset_id": asset_id},
-        )
+        out = self._credit(nid, amt, reason="seed_hold", meta={"asset_id": asset_id, "system": True})
+        if out.get("ok"):
+            self._mark_claimed("seed_hold", nid, asset_id)
+        return out
 
-    def reward_attest(self, node_id: Optional[str] = None, asset_id: str = "") -> Dict[str, Any]:
-        return self._credit(
-            node_id or self.node_id,
+    def reward_attest(
+        self,
+        node_id: Optional[str] = None,
+        asset_id: str = "",
+        *,
+        force_system: bool = False,
+    ) -> Dict[str, Any]:
+        nid = node_id or self.node_id
+        asset_id = (asset_id or "").strip()
+        if not asset_id:
+            return {"ok": False, "error": "asset_id required for attest mint"}
+        if self._already_claimed("attest", nid, asset_id):
+            return {"ok": False, "error": "already claimed", "reason": "attest", "asset_id": asset_id, "to": nid}
+        out = self._credit(
+            nid,
             self.policy.attest,
             reason="attest",
-            meta={"asset_id": asset_id},
+            meta={"asset_id": asset_id, "system": True},
         )
+        if out.get("ok"):
+            self._mark_claimed("attest", nid, asset_id)
+        return out
 
-    def reward_uptime(self, node_id: Optional[str] = None) -> Dict[str, Any]:
-        return self._credit(
-            node_id or self.node_id,
-            self.policy.uptime_tick,
-            reason="uptime",
-        )
+    def reward_uptime(self, node_id: Optional[str] = None, epoch_key: str = "") -> Dict[str, Any]:
+        nid = node_id or self.node_id
+        epoch_key = (epoch_key or "").strip() or f"tick-{int(time.time()) // 3600}"
+        if self._already_claimed("uptime", nid, epoch_key):
+            return {"ok": False, "error": "already claimed", "reason": "uptime", "asset_id": epoch_key}
+        out = self._credit(nid, self.policy.uptime_tick, reason="uptime", meta={"epoch": epoch_key, "system": True})
+        if out.get("ok"):
+            self._mark_claimed("uptime", nid, epoch_key)
+        return out
 
     def score_holders(self, asset_id: str) -> List[Dict[str, Any]]:
+        """System path: reward each verified holder once per asset."""
+        asset_id = (asset_id or "").strip()
+        if not asset_id:
+            return [{"ok": False, "error": "asset_id required"}]
         holders: List[str] = []
         try:
             from mods.asset_fabric.fabric import AssetFabric
@@ -224,6 +277,7 @@ class BabelLedger:
             "node_id": self.node_id,
             "balance": self.balance(),
             "supply": self.supply(),
+            "mint_policy": "system_events_only",
             "policy": {
                 "seed_hold": self.policy.seed_hold,
                 "attest": self.policy.attest,
