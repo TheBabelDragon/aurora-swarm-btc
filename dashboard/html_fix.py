@@ -1,4 +1,4 @@
-"""Rewrite dashboard HTML/JS: hashrate_display + BVL button no longer calls open mint."""
+"""Rewrite dashboard HTML/JS + inject Comms panel script."""
 
 from __future__ import annotations
 
@@ -31,19 +31,14 @@ class StatusJsFixMiddleware(BaseHTTPMiddleware):
                     "${s.hashrate_display||(s.mining&&s.mining.hashrate_display)||'0 H/s'}",
                     1,
                 )
-            # Open mint removed — wire button to honest message
             if "/bvl/reward_seed" in text:
+                text = text.replace("fetch('/bvl/reward_seed'", "fetch('/mining/yearn'")
+            if "/ux/comms.js" not in text and "</body>" in text:
                 text = text.replace(
-                    "async function bvlRewardSeed(){const ih=document.getElementById('ensure_infohash').value.trim();const fd=new FormData();if(ih)fd.append('asset_id',ih);\n"
-                    "const data=await fetch('/bvl/reward_seed',{method:'POST',body:fd}).then(r=>r.json());showT(data.ok||data.status==='ok'?`BVL scored`:(data.error||data.detail||'fail'),!!(data.ok||data.status==='ok'));setTimeout(refresh,400)}",
-                    "async function bvlRewardSeed(){showT('BVL mints only from swarm work (asset complete / anchor) — not a button',false)}",
+                    "</body>",
+                    '<script src="/ux/comms.js"></script></body>',
+                    1,
                 )
-                # fallback shorter replace if formatting differs
-                if "/bvl/reward_seed" in text:
-                    text = text.replace(
-                        "fetch('/bvl/reward_seed'",
-                        "fetch('/mining/yearn'",
-                    )
             body = text.encode("utf-8")
         except Exception as e:
             logger.debug(f"html fix: {e}")
@@ -59,4 +54,15 @@ class StatusJsFixMiddleware(BaseHTTPMiddleware):
 
 def install_html_fix(app: Any):
     app.add_middleware(StatusJsFixMiddleware)
-    logger.info("html_fix middleware installed")
+
+    @app.get("/ux/comms.js")
+    def ux_comms_js():
+        from pathlib import Path
+
+        p = Path(__file__).resolve().parent / "ux_comms.js"
+        try:
+            return Response(content=p.read_text(), media_type="application/javascript")
+        except Exception:
+            return Response(content="/* missing */", media_type="application/javascript")
+
+    logger.info("html_fix + comms.js installed")

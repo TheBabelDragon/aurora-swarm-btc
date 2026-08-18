@@ -1,8 +1,8 @@
 """
 Babel Value Ledger — public service API.
 
-Minting is intended for system processes (EconomyReactor), not arbitrary HTTP.
-Each (reason, node, asset) claim is granted at most once.
+Balances and supply live on shared Redis (expire=0). Global accuracy requires
+all nodes to use the same REDIS_URL.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from comms.layer import CommsLayer, SwarmMessage
 
-from .ledger import BVLLedger
+from .ledger import BAL_PREFIX, BVLLedger
 from .policy import BVLPolicy
 
 logger = logging.getLogger("aurora.bvl")
@@ -32,12 +32,37 @@ class BabelLedger:
     def supply(self) -> float:
         return self.ledger.get_supply()
 
+    def all_balances(self) -> Dict[str, float]:
+        """Scan Redis for bvl:bal:* — global view on shared mesh."""
+        out: Dict[str, float] = {}
+        try:
+            # keys stored as aurora:bvl:bal:NODE
+            r = self.comms.r
+            for key in r.scan_iter(match="aurora:bvl:bal:*", count=200):
+                k = key.decode() if isinstance(key, bytes) else str(key)
+                node = k.split("aurora:bvl:bal:")[-1]
+                try:
+                    out[node] = float(r.get(key) or 0)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"all_balances: {e}")
+            # fallback: peers only
+            try:
+                for n in self.comms.get_active_nodes() or []:
+                    nid = n.get("node_id") or ""
+                    if nid:
+                        out[nid] = self.ledger.get_balance(nid)
+            except Exception:
+                pass
+        return out
+
     def _claim_key(self, reason: str, node_id: str, asset_id: str) -> str:
         return f"bvl:claim:{reason}:{node_id}:{asset_id}"
 
     def _already_claimed(self, reason: str, node_id: str, asset_id: str) -> bool:
         if not asset_id:
-            return True  # refuse mint without asset binding
+            return True
         try:
             return bool(self.comms.get_state(self._claim_key(reason, node_id, asset_id)))
         except Exception:
@@ -48,7 +73,7 @@ class BabelLedger:
             self.comms.set_state(
                 self._claim_key(reason, node_id, asset_id),
                 {"ts": time.time(), "reason": reason, "node_id": node_id, "asset_id": asset_id},
-                expire=0,
+                expire=0,  # persistent claim
             )
         except Exception as e:
             logger.warning(f"claim mark failed: {e}")
@@ -116,7 +141,6 @@ class BabelLedger:
         *,
         force_system: bool = False,
     ) -> Dict[str, Any]:
-        """System mint for holding/completing an asset. Idempotent per node+asset."""
         nid = node_id or self.node_id
         asset_id = (asset_id or "").strip()
         if not asset_id:
@@ -163,7 +187,6 @@ class BabelLedger:
         return out
 
     def score_holders(self, asset_id: str) -> List[Dict[str, Any]]:
-        """System path: reward each verified holder once per asset."""
         asset_id = (asset_id or "").strip()
         if not asset_id:
             return [{"ok": False, "error": "asset_id required"}]
@@ -175,10 +198,7 @@ class BabelLedger:
             holders = list(fabric.swarm_possession(asset_id).get("holders") or [])
         except Exception as e:
             logger.debug(f"score_holders: {e}")
-        out = []
-        for h in holders:
-            out.append(self.reward_seed(h, asset_id=asset_id))
-        return out
+        return [self.reward_seed(h, asset_id=asset_id) for h in holders]
 
     def transfer(self, to_node: str, amount: float, memo: str = "") -> Dict[str, Any]:
         from_node = self.node_id
@@ -238,7 +258,6 @@ class BabelLedger:
         burned = self._debit(node, amount_bvl, reason="settle_to_sats", meta={"asset_id": asset_id})
         if not burned.get("ok"):
             return burned
-
         sats = int(amount_bvl * self.policy.settle_sats_per_bvl)
         tip_entry = None
         try:
@@ -253,31 +272,22 @@ class BabelLedger:
             )
         except Exception as e:
             tip_entry = {"ok": False, "error": str(e)}
-
-        result = {
-            "ok": True,
-            "burned": burned,
-            "sats_requested": sats,
-            "tip": tip_entry,
-        }
+        result = {"ok": True, "burned": burned, "sats_requested": sats, "tip": tip_entry}
         self.ledger.append(
-            {
-                "type": "settle",
-                "node": node,
-                "amount_bvl": amount_bvl,
-                "sats": sats,
-                "tip": tip_entry,
-                "ts": time.time(),
-            }
+            {"type": "settle", "node": node, "amount_bvl": amount_bvl, "sats": sats, "tip": tip_entry, "ts": time.time()}
         )
         return result
 
     def status(self) -> Dict[str, Any]:
+        balances = self.all_balances()
         return {
             "node_id": self.node_id,
             "balance": self.balance(),
             "supply": self.supply(),
+            "balances_global": balances,
+            "balance_sum": round(sum(balances.values()), 6),
             "mint_policy": "system_events_only",
+            "persistence": "redis_shared_expire_0",
             "policy": {
                 "seed_hold": self.policy.seed_hold,
                 "attest": self.policy.attest,

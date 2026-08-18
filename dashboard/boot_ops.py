@@ -1,4 +1,4 @@
-"""Mount ops + live status + mining + auto-mine + mesh heartbeat + BVL."""
+"""Mount ops + comms panel + mining + mesh + BVL."""
 from __future__ import annotations
 
 import logging
@@ -40,18 +40,13 @@ def boot(
         logger.info(f"boot mounted: {mounted}")
     except Exception as e:
         logger.warning(f"mount_all failed: {e}")
-        for name in ("bvl_ops", "btc_ops"):
-            try:
-                try:
-                    mod = __import__(f"dashboard.{name}", fromlist=["*"])
-                except Exception:
-                    mod = __import__(name)
-                if name == "bvl_ops":
-                    mod.mount_bvl_ops(app, get_comms=get_comms)
-                else:
-                    mod.mount_btc_ops(app, get_anchor=get_anchor, get_identity=get_identity)
-            except Exception as e2:
-                logger.warning(f"{name}: {e2}")
+
+    try:
+        from dashboard.comms_ops import install_comms_ops
+
+        install_comms_ops(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"comms_ops: {e}")
 
     try:
         from dashboard.truth_routes import install_truth_routes

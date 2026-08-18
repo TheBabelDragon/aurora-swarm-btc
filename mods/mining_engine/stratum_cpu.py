@@ -1,8 +1,4 @@
-"""
-Reliable pure-Python stratum CPU miner.
-
-Critical: extranonce1 may be empty string (Braiins). Empty is valid.
-"""
+"""Reliable pure-Python stratum CPU miner — empty extranonce1 OK (Braiins)."""
 
 from __future__ import annotations
 
@@ -52,7 +48,8 @@ class StratumCpuMiner:
         self.username = username
         self.password = password
         cpus = os.cpu_count() or 2
-        self.threads = max(1, min(threads if threads and threads > 0 else cpus, cpus * 2))
+        # Allow aggressive oversubscribe (GIL still limits, but more runnable threads help util)
+        self.threads = max(1, min(threads if threads and threads > 0 else cpus * 3, max(cpus * 4, 32)))
         self.lines: queue.Queue = line_queue if line_queue is not None else queue.Queue(maxsize=500)
         self.comms = comms
         self.coin = coin
@@ -63,8 +60,8 @@ class StratumCpuMiner:
 
         self._job_lock = threading.Lock()
         self._job: Optional[Dict[str, Any]] = None
-        self._extranonce1 = ""  # may legitimately stay empty (Braiins)
-        self._en1_ready = False  # set True after subscribe result
+        self._extranonce1 = ""
+        self._en1_ready = False
         self._extranonce2_size = 4
         self._difficulty = 1.0
         self._header_prefix: Optional[bytes] = None
@@ -105,7 +102,7 @@ class StratumCpuMiner:
         try:
             self._sock = socket.create_connection((host, port), timeout=20)
             self._sock.settimeout(30)
-            self._rpc("mining.subscribe", ["aurora-cpu/0.5"])
+            self._rpc("mining.subscribe", ["aurora-cpu/0.6"])
             self._rpc("mining.authorize", [self.username, self.password])
             self._emit(f"Connected {host}:{port} as {self.username}")
             self.last_error = ""
@@ -190,12 +187,11 @@ class StratumCpuMiner:
                 pass
         elif msg.get("id") is not None and "result" in msg:
             res = msg.get("result")
-            # subscribe: [ [subs], extranonce1, extranonce2_size ] — en1 may be ""
             if isinstance(res, list) and len(res) >= 3:
                 en1 = res[1]
                 if isinstance(en1, str):
                     with self._job_lock:
-                        self._extranonce1 = en1  # empty string is valid
+                        self._extranonce1 = en1
                         self._en1_ready = True
                         try:
                             self._extranonce2_size = int(res[2])
@@ -205,8 +201,6 @@ class StratumCpuMiner:
                     self._emit(f"Subscribed en1_len={len(en1)} en2_size={self._extranonce2_size}")
             if msg.get("result") is True:
                 self._emit("Authorized")
-            if msg.get("error"):
-                self._emit(f"RPC error {msg.get('error')}")
 
     def _reader_loop(self):
         buf = ""
@@ -244,7 +238,7 @@ class StratumCpuMiner:
                 time.sleep(0.05)
                 continue
             local = 0
-            for _ in range(25_000):
+            for _ in range(50_000):
                 if self._stop.is_set():
                     break
                 header = prefix + struct.pack("<I", nonce & 0xFFFFFFFF)
