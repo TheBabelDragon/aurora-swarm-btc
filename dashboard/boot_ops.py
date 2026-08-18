@@ -1,4 +1,4 @@
-"""Mount ops — additive only; never remove working routes."""
+"""Mount ops — additive; auto paths so UI never needs curl."""
 from __future__ import annotations
 
 import logging
@@ -27,7 +27,6 @@ def boot(
     except Exception as e:
         logger.warning(f"html_fix: {e}")
 
-    # Identity FIRST so /btc/identity/register always exists
     try:
         from dashboard.identity_fix import install_identity_routes
 
@@ -62,6 +61,13 @@ def boot(
         install_node_ops(app, get_comms=get_comms, get_identity=get_identity)
     except Exception as e:
         logger.warning(f"node_ops: {e}")
+
+    try:
+        from dashboard.selftest_ops import install_selftest_ops
+
+        install_selftest_ops(app, get_comms=get_comms, get_identity=get_identity)
+    except Exception as e:
+        logger.warning(f"selftest_ops: {e}")
 
     try:
         from dashboard.truth_routes import install_truth_routes
@@ -125,14 +131,23 @@ def boot(
     except Exception as e:
         logger.warning(f"mesh_heartbeat: {e}")
 
+    # Auto identity on process start (no button / no curl)
     try:
+        from mods.btc_identity.identity import NodeIdentity
+
+        ident = None
         if get_identity:
-            ident = get_identity()
-            if ident:
-                ident.register_with_identity(
-                    capabilities=["dashboard", "mesh", "mining_engine", "chat", "btc_identity"]
-                )
+            try:
+                ident = get_identity()
+            except Exception:
+                ident = None
+        if not ident:
+            ident = NodeIdentity(get_comms())
+        ident.register_with_identity(
+            capabilities=["dashboard", "mesh", "mining_engine", "chat", "btc_identity"]
+        )
+        logger.info("auto identity registered at boot")
     except Exception as e:
-        logger.warning(f"identity register: {e}")
+        logger.warning(f"auto identity: {e}")
 
     app.state.aurora_booted = True
