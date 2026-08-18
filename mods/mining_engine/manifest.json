@@ -1,0 +1,7 @@
+{
+  "name": "mining_engine",
+  "version": "0.1.0",
+  "description": "Swarm-native mining tandem: bfgminer process control, share→provenance, adaptive intensity, fleet coordination",
+  "entrypoint": "entrypoint.py",
+  "capabilities": ["mining_engine", "gpu_mining"]
+}
