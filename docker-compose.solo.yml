@@ -40,7 +40,8 @@ services:
       - PYTHONUNBUFFERED=1
       - AURORA_NODE_ID=${AURORA_NODE_ID:-}
       - AURORA_NODE_KEY_PATH=/data/aurora_node_key.json
-      - AURORA_AUTO_MINE=${AURORA_AUTO_MINE:-1}
+      # Default off — you press Start when ready
+      - AURORA_AUTO_MINE=${AURORA_AUTO_MINE:-0}
       - AURORA_MINER_BACKEND=${AURORA_MINER_BACKEND:-cpu}
       - AURORA_CPU_THREADS=${AURORA_CPU_THREADS:-0}
       - AURORA_CPU_OVERSUBSCRIBE=${AURORA_CPU_OVERSUBSCRIBE:-3}
