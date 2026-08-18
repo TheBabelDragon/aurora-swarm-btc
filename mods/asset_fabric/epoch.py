@@ -6,6 +6,7 @@ Bitcoin does not store assets. It timestamps a root over:
   - topology snapshot
   - redundancy policy
   - optional BVL supply
+  - optional mining provenance snapshot
 
 commit_epoch() → mesh record + soft btc_anchor.
 """
@@ -43,6 +44,7 @@ class EpochBuilder:
         topology: Optional[List[Dict[str, Any]]] = None,
         policy: Optional[Dict[str, Any]] = None,
         bvl_supply: Optional[float] = None,
+        mining_snapshot: Optional[Dict[str, Any]] = None,
         note: str = "",
     ) -> Dict[str, Any]:
         body = {
@@ -54,17 +56,20 @@ class EpochBuilder:
             "topology": topology or [],
             "policy": policy or {},
             "bvl_supply": bvl_supply,
+            "mining_snapshot": mining_snapshot or {},
             "note": note,
         }
         body["registry_root"] = _sha(body["verified_registry"])
         body["topology_root"] = _sha(body["topology"])
         body["policy_root"] = _sha(body["policy"])
+        body["mining_root"] = _sha(body.get("mining_snapshot") or {})
         body["epoch_root"] = _sha(
             {
                 "registry_root": body["registry_root"],
                 "topology_root": body["topology_root"],
                 "policy_root": body["policy_root"],
                 "bvl_supply": bvl_supply,
+                "mining_root": body["mining_root"],
                 "ts": body["ts"],
                 "by": body["by"],
             }
@@ -78,10 +83,10 @@ class EpochBuilder:
         topology_registry: Any = None,
         policy: Any = None,
         note: str = "",
+        mining_epoch: Optional[int] = None,
     ) -> Dict[str, Any]:
         verified: Dict[str, Any] = {}
         if possession is not None:
-            # possession.verified: asset → node → VerifiedPossession
             try:
                 for asset_id, nodes in getattr(possession, "verified", {}).items():
                     verified[asset_id] = {
@@ -110,22 +115,35 @@ class EpochBuilder:
         except Exception:
             pass
 
+        mining_snapshot = None
+        try:
+            from mods.mining_provenance.service import MiningProvenance
+
+            ep = int(mining_epoch if mining_epoch is not None else int(time.time()) // 3600)
+            mining_snapshot = MiningProvenance(self.comms).epoch_snapshot(ep)
+        except Exception:
+            pass
+
         return self.build(
             verified_registry=verified,
             topology=topo_list,
             policy=pol,
             bvl_supply=bvl_supply,
+            mining_snapshot=mining_snapshot,
             note=note,
         )
 
     def commit(self, epoch: Dict[str, Any], *,
                request_broadcast: bool = False) -> Dict[str, Any]:
-        """Store on mesh; optionally anchor via btc_anchor."""
         root = epoch.get("epoch_root") or ""
         asset_id = f"epoch-{root[:32]}" if root else f"epoch-{int(time.time())}"
         try:
             self.comms.set_state(f"epoch:{asset_id}", epoch, expire=0)
-            self.comms.set_state("epoch:latest", {"asset_id": asset_id, "root": root, "ts": epoch.get("ts")}, expire=0)
+            self.comms.set_state(
+                "epoch:latest",
+                {"asset_id": asset_id, "root": root, "ts": epoch.get("ts")},
+                expire=0,
+            )
         except Exception as e:
             logger.warning(f"epoch mesh store: {e}")
 
@@ -134,7 +152,6 @@ class EpochBuilder:
             from mods.btc_anchor.anchor import AssetAnchor
 
             anc = AssetAnchor(self.comms)
-            # Prefer record() if present; else minimal path
             if hasattr(anc, "record"):
                 rec = anc.record(
                     asset_id,
@@ -146,17 +163,23 @@ class EpochBuilder:
                     anc.request_broadcast(asset_id)
                 anchor_rec = rec.to_dict() if rec and hasattr(rec, "to_dict") else rec
             else:
-                # Fallback: store commitment-shaped note in mesh only
                 anchor_rec = {"commitment": root, "status": "mesh_only"}
         except Exception as e:
             logger.debug(f"epoch anchor soft-fail: {e}")
             anchor_rec = {"error": str(e), "commitment": root}
 
-        return {"ok": True, "asset_id": asset_id, "epoch_root": root, "anchor": anchor_rec, "epoch": epoch}
+        return {
+            "ok": True,
+            "asset_id": asset_id,
+            "epoch_root": root,
+            "anchor": anchor_rec,
+            "epoch": epoch,
+        }
 
 
 def commit_epoch(comms: CommsLayer, **kwargs) -> Dict[str, Any]:
-    """Convenience: build from local state and commit."""
     b = EpochBuilder(comms)
-    epoch = b.from_local_state(**{k: v for k, v in kwargs.items() if k != "request_broadcast"})
+    epoch = b.from_local_state(
+        **{k: v for k, v in kwargs.items() if k != "request_broadcast"}
+    )
     return b.commit(epoch, request_broadcast=bool(kwargs.get("request_broadcast")))
