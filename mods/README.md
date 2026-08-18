@@ -8,7 +8,8 @@ This directory contains all experimental and pluggable behavior for the swarm.
 
 - `thermal_aware_scheduler` — Prioritizes cooler nodes
 - `gpu_utilization_balancer` — Avoids highly utilized GPUs
-- `torrent_protocol` — In-mesh BitTorrent-inspired piece distribution for large assets
+- `torrent_protocol` — In-mesh piece distribution (current Asset Fabric transport)
+- `asset_fabric` — Content-addressed swarm Asset Fabric (`ensure` is the public verb)
 
 ## Mod Structure
 
@@ -26,7 +27,7 @@ mods/
 
 ## How Mods Work
 
-1. Core exposes hooks (e.g. `on_node_select`)
+1. Core exposes hooks (e.g. `on_node_select`, `on_asset_needed`)
 2. Enabled mods subscribe to relevant hooks via `entrypoint.py`
 3. Mods can modify behavior before core continues execution
 
@@ -38,3 +39,8 @@ mods/
 - Only promote to core after long-term stability
 
 See `scheduler/hook_registry.py` and `scheduler/node_selector.py` for how hooks are used.
+
+### Asset direction
+
+Prefer the `asset_fabric` language (`ensure`, `publish`, `possession`) for new code.  
+`torrent_protocol` remains the piece-transport implementation underneath it.

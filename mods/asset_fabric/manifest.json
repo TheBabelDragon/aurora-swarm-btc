@@ -1,0 +1,9 @@
+{
+  "name": "asset_fabric",
+  "type": "comms",
+  "version": "0.1.0",
+  "entry": "entrypoint.py",
+  "enabled": true,
+  "dependencies": ["comms", "torrent_protocol"],
+  "description": "Content-addressed swarm Asset Fabric — durable abstraction over piece distribution. Primary verb: ensure()."
+}
