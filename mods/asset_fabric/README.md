@@ -5,40 +5,40 @@
 > Aurora does not require every node to be trustworthy.
 > It requires every piece of state to be verifiable.
 
-## Topology + repair
+## Repair executor
 
 ```python
-from mods.asset_fabric.topology import NodeTopology, TopologyRegistry, publish_topology
-from mods.asset_fabric.repair import RepairPlanner, RedundancyPolicy, encode_important
-from mods.asset_fabric.possession_verify import PossessionTracker
+from mods.asset_fabric.repair_executor import RepairExecutor
 
-publish_topology(comms)  # AURORA_SITE / POWER / NETWORK / RACK
-
-possession = PossessionTracker()
-topo = TopologyRegistry()
-planner = RepairPlanner(possession, topo, RedundancyPolicy(
-    min_verified_holders=3,
-    min_power=2,
-    min_network=2,
-))
-
-report = planner.availability(asset_id)
-# report.ok / report.deficits  — claimed is ignored; verified only
-
-plan = planner.plan_repair(asset_id, candidate_nodes)
-rs_plan = planner.plan_rs_placement(asset_id, candidate_nodes)
-enc = encode_important(data)  # RS shards for domain placement
+execu = RepairExecutor(comms, planner, list_candidates=lambda: node_ids)
+execu.run_for_asset(asset_id)   # availability → plan → asset.needed / asset.repair
+execu.place_rs(asset_id)        # domain-aware shard placement directives
 ```
+
+## Epoch roots → Bitcoin
+
+```python
+from mods.asset_fabric.epoch import EpochBuilder, commit_epoch
+
+epoch = EpochBuilder(comms).from_local_state(
+    possession=manager.possession,
+    topology_registry=manager.topology,
+    policy=manager.repair_planner.policy,
+)
+EpochBuilder(comms).commit(epoch, request_broadcast=False)
+# or: commit_epoch(comms, possession=..., request_broadcast=True)
+```
+
+Roots cover verified registry, topology, policy, optional BVL supply.
+Bitcoin timestamps the commitment — not the data plane.
 
 ## Modules
 
 | Module | Role |
 |--------|------|
-| `fabric` | publish / ensure / possession |
-| `merkle_pieces` | Merkle proofs |
-| `peer_evidence` | PeerScore |
-| `possession_verify` | claimed vs verified |
-| `challenge` | mesh challenges |
-| `erasure` | Reed-Solomon N+M |
+| `erasure` | Reed-Solomon |
 | `topology` | failure domains |
-| `repair` | verified availability + placement plans |
+| `repair` | verified availability plans |
+| `repair_executor` | mesh jobs from plans |
+| `epoch` | state roots + btc_anchor |
+| `challenge` / `merkle_pieces` / `peer_evidence` | Byzantine content path |
