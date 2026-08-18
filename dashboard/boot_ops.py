@@ -1,4 +1,4 @@
-"""Mount ops + truthful status + native fleet/transfer; start BVL economy."""
+"""Mount ops + truthful status + fleet/transfer + mining engine; start BVL economy."""
 from __future__ import annotations
 
 import logging
@@ -65,7 +65,13 @@ def boot(
     except Exception as e:
         logger.warning(f"ops_native: {e}")
 
-    # BVL mint path: swarm events only
+    try:
+        from dashboard.mining_engine_ops import install_mining_engine_ops
+
+        install_mining_engine_ops(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"mining_engine_ops: {e}")
+
     try:
         from mods.bvl.economy import start_economy
 
