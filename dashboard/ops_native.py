@@ -1,11 +1,5 @@
 """
-Dashboard-native ops: fleet telemetry + controlled BVL transfer.
-
-Security posture (mesh credit, not bank-grade):
-- transfer requires explicit confirm_to matching to_node
-- optional require_known: recipient must appear in active mesh nodes
-- amount/memo validated; no silent self-transfer
-- fleet card never invents hashrate — missing means not published
+Dashboard-native ops: fleet, BVL transfer, mining start/stop UI.
 """
 
 from __future__ import annotations
@@ -30,31 +24,61 @@ EXTRA_JS = r"""
     if(!host||!host.parentNode) return;
     const wrap=document.createElement('div');
     wrap.className='card';
-    wrap.innerHTML='<h2>Fleet</h2><div id="fleet_card" class="muted">No worker telemetry yet — start a miner worker to publish hashrate.</div><h2 style="margin-top:18px">BVL transfer</h2><p class="muted">Mesh credit only. Type recipient id twice. Optional: require known node.</p><div class="section"><input id="xfer_to" placeholder="to node id"><input id="xfer_confirm" placeholder="confirm node id"><input id="xfer_amount" type="number" step="any" min="0" placeholder="amount" style="width:120px"><input id="xfer_memo" placeholder="memo (optional)"><label class="muted"><input type="checkbox" id="xfer_known"> require known node</label><button type="button" onclick="bvlTransferSafe()">Transfer BVL</button></div><div id="xfer_result" style="min-height:18px;margin-top:8px"></div>';
+    wrap.innerHTML='<h2>Mining</h2><div id="mine_status" class="muted">Checking miner…</div><div class="section"><button type="button" onclick="startMining()">Start mining</button><button type="button" class="danger" onclick="stopMining()">Stop mining</button></div><div id="mine_result" style="min-height:18px;margin-top:8px"></div><p class="muted">Pays out to <span class="mono" id="mine_wallet">MINING_WALLET</span> via pool auth (wallet.worker). Requires bfgminer on host or a mesh worker.</p><h2 style="margin-top:18px">Fleet</h2><div id="fleet_card" class="muted">No worker telemetry yet.</div><h2 style="margin-top:18px">BVL transfer</h2><p class="muted">Mesh credit only. Type recipient id twice. Optional: require known node.</p><div class="section"><input id="xfer_to" placeholder="to node id"><input id="xfer_confirm" placeholder="confirm node id"><input id="xfer_amount" type="number" step="any" min="0" placeholder="amount" style="width:120px"><input id="xfer_memo" placeholder="memo (optional)"><label class="muted"><input type="checkbox" id="xfer_known"> require known node</label><button type="button" onclick="bvlTransferSafe()">Transfer BVL</button></div><div id="xfer_result" style="min-height:18px;margin-top:8px"></div>';
     host.parentNode.insertBefore(wrap, host.nextSibling);
   }
   async function refreshFleet(){
     ensurePanels();
     try{
-      const d=await fetch('/mesh/fleet').then(r=>r.json());
-      const nodes=d.nodes||[];
+      const d=await fetch('/mining/engine/status').then(r=>r.json());
+      const local=d.local||{};
+      const w=local.wallet||'';
+      if(el('mine_wallet')) el('mine_wallet').textContent=w?w:'(not set — export MINING_WALLET)';
+      const parts=[];
+      parts.push(w?('wallet '+w.slice(0,12)+'…'):'wallet not set');
+      parts.push(local.backend_available?'bfgminer found':'bfgminer missing');
+      parts.push(local.running?'RUNNING':'stopped');
+      if(local.hashrate_ghs!=null) parts.push(local.hashrate_ghs+' GH/s');
+      if(el('mine_status')) el('mine_status').textContent=parts.join(' · ');
+      const nodes=d.workers||[];
       if(!nodes.length){
-        el('fleet_card').textContent='No active mesh nodes registered.';
-        return;
+        el('fleet_card').textContent='No mining workers publishing yet.';
+      } else {
+        let h='<table><tr><th>Worker</th><th>GH/s</th><th>Intensity</th><th>Status</th></tr>';
+        for(const n of nodes){
+          const hr=n.hashrate_ghs;
+          h+='<tr><td class="mono">'+(n.worker_id||'')+'</td><td>'+(hr==null?'—':hr)+'</td><td>'+(n.intensity||'—')+'</td><td>'+(n.paused?'paused':(n.running?'mining':'—'))+'</td></tr>';
+        }
+        h+='</table>';
+        if(d.total_hashrate_ghs!=null) h+='<p class="muted">fleet total: '+d.total_hashrate_ghs+' GH/s</p>';
+        el('fleet_card').innerHTML=h;
       }
-      let h='<table><tr><th>Node</th><th>Type</th><th>Caps</th><th>Hashrate</th><th>Status</th></tr>';
-      for(const n of nodes){
-        const hr=n.hashrate_ghs;
-        const hrText=(hr===null||hr===undefined)?'—':(hr+' GH/s');
-        h+='<tr><td class="mono">'+(n.node_id||'')+'</td><td>'+(n.node_type||'')+'</td><td class="muted">'+(n.capabilities||[]).join(', ')+'</td><td>'+hrText+'</td><td>'+(n.status||'—')+'</td></tr>';
-      }
-      h+='</table>';
-      if(d.cluster_shares!=null) h+='<p class="muted">cluster shares accepted: '+d.cluster_shares+'</p>';
-      el('fleet_card').innerHTML=h;
     }catch(e){
-      if(el('fleet_card')) el('fleet_card').textContent='Fleet endpoint unavailable';
+      if(el('fleet_card')) el('fleet_card').textContent='Mining status unavailable';
+      if(el('mine_status')) el('mine_status').textContent='status error';
     }
   }
+  window.startMining=async function(){
+    ensurePanels();
+    const data=await fetch('/mining/engine/start',{method:'POST'}).then(r=>r.json());
+    const ok=!!data.ok;
+    let msg=ok?'Mining start issued':'Start failed';
+    if(data.error) msg+=' — '+data.error;
+    if(data.local&&data.local.error) msg+=' — local: '+data.local.error;
+    if(data.wallet) msg+=' · wallet '+data.wallet.slice(0,14)+'…';
+    const out=el('mine_result');
+    out.textContent=msg;
+    out.className=ok?'success':'error';
+    setTimeout(refreshFleet,800);
+  };
+  window.stopMining=async function(){
+    ensurePanels();
+    const data=await fetch('/mining/engine/stop',{method:'POST'}).then(r=>r.json());
+    const out=el('mine_result');
+    out.textContent=data.ok?'Mining stop issued':(data.error||'stop failed');
+    out.className=data.ok?'success':'error';
+    setTimeout(refreshFleet,800);
+  };
   window.bvlTransferSafe=async function(){
     ensurePanels();
     const to=(el('xfer_to').value||'').trim();

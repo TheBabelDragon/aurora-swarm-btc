@@ -1,4 +1,5 @@
-# Solo / laptop: Redis + Dashboard only (no scheduler)
+# Solo / laptop: Redis + Dashboard
+# Mining: set MINING_WALLET; optional BFGMINER_PATH mount for local Start Mining
 services:
   redis:
     image: redis:7-alpine
@@ -30,6 +31,15 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
       - AURORA_NODE_ID=dashboard
+      - MINING_WALLET=${MINING_WALLET:-}
+      - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
+      - INTENSITY=${INTENSITY:-19}
+      - GPUS_PER_POD=${GPUS_PER_POD:-1}
+      - BFGMINER_BIN=${BFGMINER_BIN:-/host-bin/bfgminer}
+      - WORKER_NAME=${WORKER_NAME:-dashboard}
+    volumes:
+      # Optional: mount host bfgminer so dashboard Start Mining can hash
+      - ${BFGMINER_PATH:-/usr/bin/bfgminer}:/host-bin/bfgminer:ro
     restart: unless-stopped
     networks:
       - aurora-net
