@@ -1,4 +1,4 @@
-"""Mount ops + live status + mining + auto-mine + BVL."""
+"""Mount ops + live status + mining + auto-mine + html fix + BVL."""
 from __future__ import annotations
 
 import logging
@@ -19,6 +19,13 @@ def boot(
 ):
     if getattr(app.state, "aurora_booted", False):
         return
+
+    try:
+        from dashboard.html_fix import install_html_fix
+
+        install_html_fix(app)
+    except Exception as e:
+        logger.warning(f"html_fix: {e}")
 
     try:
         from dashboard.mount_all import mount_optional_ops
@@ -91,11 +98,9 @@ def boot(
         from mods.bvl.economy import start_economy
 
         start_economy(get_comms())
-        logger.info("BVL EconomyReactor started")
     except Exception as e:
         logger.warning(f"economy reactor: {e}")
 
-    # Just works: start mining without curl / button
     try:
         from dashboard.auto_mine import start_auto_mine
 
