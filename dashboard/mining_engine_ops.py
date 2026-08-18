@@ -26,24 +26,10 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
 
     @app.post("/mining/engine/start")
     async def mining_engine_start():
-        """
-        Start mining to MINING_WALLET.
-        1) Local MiningEngine if bfgminer present
-        2) Mesh broadcast resume so any workers also mine
-        """
         try:
             from dashboard.local_miner import start_local, wallet_configured
 
             wallet = wallet_configured()
-            if not wallet:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "MINING_WALLET not set",
-                        "hint": "export MINING_WALLET=bc1q… before compose up",
-                    },
-                    status_code=400,
-                )
             local = start_local(get_comms())
             mesh = {"ok": False}
             try:
@@ -58,7 +44,7 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
                 "wallet": wallet,
                 "local": local,
                 "mesh": mesh,
-                "note": "Pool credits the configured wallet; Aurora does not forge deposits",
+                "note": "Pool credits the configured/default wallet",
             }
         except Exception as e:
             logger.exception("start")
@@ -104,4 +90,4 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-    logger.info("mining_engine_ops mounted (start/stop)")
+    logger.info("mining_engine_ops mounted (start/stop, default wallet)")

@@ -1,9 +1,8 @@
 """
 Dashboard-local MiningEngine singleton.
 
-When MINING_WALLET is set and bfgminer is on PATH (or BFGMINER_BIN),
-Start Mining runs a real hasher that authenticates as wallet.worker to the pool.
-Pool payouts go to that wallet — Aurora does not invent on-chain deposits.
+Uses DEFAULT_MINING_WALLET when MINING_WALLET env is unset.
+Pool auth is wallet.worker → payouts to that address.
 """
 
 from __future__ import annotations
@@ -11,7 +10,13 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any, Optional
+from typing import Any
+
+from mods.mining_engine.defaults import (
+    DEFAULT_INTENSITY,
+    DEFAULT_MINING_WALLET,
+    DEFAULT_POOL_URL,
+)
 
 logger = logging.getLogger("aurora-dashboard.local_miner")
 
@@ -20,7 +25,7 @@ _engine = None
 
 
 def wallet_configured() -> str:
-    return (os.getenv("MINING_WALLET") or "").strip()
+    return (os.getenv("MINING_WALLET") or DEFAULT_MINING_WALLET).strip()
 
 
 def get_local_engine(comms: Any):
@@ -29,17 +34,15 @@ def get_local_engine(comms: Any):
         if _engine is not None:
             return _engine
         wallet = wallet_configured()
-        if not wallet:
-            return None
         from mods.mining_engine.engine import MiningEngine
 
         _engine = MiningEngine(
             comms,
             worker_id=os.getenv("AURORA_NODE_ID", "dashboard"),
             worker_name=os.getenv("WORKER_NAME", os.getenv("AURORA_NODE_ID", "dashboard")),
-            pool_url=os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333"),
+            pool_url=os.getenv("POOL_URL", DEFAULT_POOL_URL),
             wallet=wallet,
-            intensity=os.getenv("INTENSITY", "19"),
+            intensity=os.getenv("INTENSITY", DEFAULT_INTENSITY),
             gpus=int(os.getenv("GPUS_PER_POD", "1")),
             facility_domain=os.getenv("FACILITY_DOMAIN", "dashboard"),
             binary=os.getenv("BFGMINER_BIN", "bfgminer"),
@@ -49,11 +52,6 @@ def get_local_engine(comms: Any):
 
 def start_local(comms: Any) -> dict:
     wallet = wallet_configured()
-    if not wallet:
-        return {
-            "ok": False,
-            "error": "MINING_WALLET not set — set env to your receive address",
-        }
     eng = get_local_engine(comms)
     if eng is None:
         return {"ok": False, "error": "could not build MiningEngine"}
@@ -62,7 +60,7 @@ def start_local(comms: Any) -> dict:
             "ok": False,
             "error": "bfgminer not found on this host/container — install or mount binary",
             "wallet": wallet,
-            "hint": "Arch: install bfgminer; compose can mount BFGMINER_PATH",
+            "hint": "Arch: install bfgminer; set BFGMINER_PATH for compose mount",
         }
     ok = eng.start()
     return {
@@ -89,12 +87,11 @@ def local_status(comms: Any) -> dict:
     eng = None
     with _lock:
         eng = _engine
-    if eng is None and wallet:
-        # describe capability without starting
+    if eng is None:
         from mods.mining_engine.backends import BfgminerBackend, MinerConfig
 
         cfg = MinerConfig(
-            pool_url=os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333"),
+            pool_url=os.getenv("POOL_URL", DEFAULT_POOL_URL),
             wallet=wallet,
             worker_name=os.getenv("WORKER_NAME", "dashboard"),
             binary=os.getenv("BFGMINER_BIN", "bfgminer"),
@@ -106,8 +103,6 @@ def local_status(comms: Any) -> dict:
             "running": False,
             "engine_built": False,
         }
-    if eng is None:
-        return {"wallet": "", "running": False, "backend_available": False, "engine_built": False}
     st = eng.status()
     return {
         "wallet": wallet,
