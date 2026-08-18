@@ -1,4 +1,4 @@
-/* Mesh Comms + shared LAN chat — hardened fetches */
+/* Mesh Comms + shared LAN chat + join mesh */
 (function () {
   var chatTarget = null;
   var lastHistSig = "";
@@ -11,8 +11,6 @@
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
-
-  /** Fetch with timeout — never hang the UI on bad resolves */
   async function fetchT(url, opts, ms) {
     ms = ms || 8000;
     var ctrl = new AbortController();
@@ -20,36 +18,24 @@
       ctrl.abort();
     }, ms);
     try {
-      var res = await fetch(url, Object.assign({}, opts || {}, { signal: ctrl.signal }));
-      return res;
+      return await fetch(url, Object.assign({}, opts || {}, { signal: ctrl.signal }));
     } finally {
       clearTimeout(t);
     }
   }
   async function jget(url, ms) {
-    var r = await fetchT(url, {}, ms || 8000);
-    return r.json();
-  }
-  async function jpost(url, body, ms) {
-    var r = await fetchT(
-      url,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      ms || 10000
-    );
-    return r.json();
+    return (await fetchT(url, {}, ms || 8000)).json();
   }
 
   window.refreshComms = async function () {
     try {
       var d = await jget("/comms/status", 6000);
       var shared =
-        d.redis_ok && (d.peer_count || 0) + (d.lan_count || 0) > 0
-          ? " · <strong>shared LAN window</strong>"
-          : "";
+        (d.peer_count || 0) > 1
+          ? ' · <strong class="success">shared mesh active</strong>'
+          : (d.lan_count || 0) > 0
+            ? ' · <span class="muted">LAN peers seen — click Join shared mesh</span>'
+            : "";
       var h =
         "<p><strong>" +
         (d.redis_ok ? "Redis OK" : "Redis DOWN") +
@@ -58,29 +44,59 @@
         "</span>" +
         shared +
         "</p>";
-      h += "<p class=\"muted\">" + esc(d.redis_url || "") + " · discovery :" + (d.discovery_port || 7379) + "</p>";
+      h += "<p class=\"muted\">" + esc(d.redis_url || "") + "</p>";
       h +=
-        "<p>Peers <strong>" +
+        "<p>Mesh peers <strong>" +
         (d.peer_count || 0) +
-        "</strong> · LAN <strong>" +
+        "</strong> · LAN beacons <strong>" +
         (d.lan_count || 0) +
-        "</strong> · global <strong>" +
+        "</strong> · " +
         esc(d.global_hashrate_display || "idle") +
-        "</strong></p>";
-      if (d.redis_ok)
-        h +=
-          '<p class="muted">#swarm is one shared log for every node on this Redis. Export join pack so peers share it.</p>';
+        "</p>";
       var c = el("comms_card");
       if (c) c.innerHTML = h;
       var title = el("chat_title");
       if (title && !chatTarget)
         title.textContent =
-          "#swarm · shared LAN room · " + (d.peer_count || 0) + " mesh peer(s)";
+          "#swarm · shared room · " + (d.peer_count || 0) + " on this Redis";
     } catch (e) {
       var c2 = el("comms_card");
-      if (c2)
-        c2.innerHTML =
-          '<span class="error">Comms slow/unreachable — will retry</span>';
+      if (c2) c2.innerHTML = '<span class="error">Comms slow — retrying</span>';
+    }
+  };
+
+  window.joinSharedMesh = async function () {
+    var o = el("comms_result");
+    if (o) {
+      o.textContent = "Joining shared mesh…";
+      o.className = "muted";
+    }
+    try {
+      var fd = new FormData();
+      var d = await fetchT("/comms/join_mesh", { method: "POST", body: fd }, 15000).then(function (r) {
+        return r.json();
+      });
+      if (o) {
+        if (d.ok) {
+          o.textContent = d.joined
+            ? "Joined " + (d.redis_url || "") + " · peers " + (d.peers || 0)
+            : d.already
+              ? "Already on shared mesh"
+              : d.reason || "ok";
+          o.className = "success";
+        } else {
+          o.textContent = d.error || "join failed";
+          o.className = "error";
+        }
+      }
+      refreshComms();
+      refreshChatUsers();
+      refreshChatHistory();
+    } catch (e) {
+      if (o) {
+        o.textContent = "join timeout";
+        o.className = "error";
+      }
     }
   };
 
@@ -99,8 +115,6 @@
         var on = u.online ? "●" : "○";
         var id = esc(u.node_id);
         var sel = chatTarget === u.node_id ? ' style="background:#1a3a1a"' : "";
-        h +
-          '';
         h +=
           '<div style="padding:4px 2px;cursor:pointer" class="chat-user" data-nid="' +
           id +
@@ -112,7 +126,6 @@
           id +
           '</span><div class="muted" style="font-size:11px">' +
           esc(u.source) +
-          (u.from_ip ? " · " + esc(u.from_ip) : "") +
           "</div></div>";
       }
       if (
@@ -121,7 +134,7 @@
         }).length
       )
         h +=
-          '<div class="muted">Only you here — other LAN nodes must use same Redis (Download .env / join.sh)</div>';
+          '<div class="muted">Only you on this Redis — Join shared mesh on both machines</div>';
       box.innerHTML = h;
       var nodes = box.querySelectorAll(".chat-user");
       for (var j = 0; j < nodes.length; j++) {
@@ -133,17 +146,14 @@
       }
     } catch (e) {
       var b = el("chat_users");
-      if (b) b.innerHTML = '<span class="error">users timeout — retrying</span>';
+      if (b) b.innerHTML = '<span class="error">users timeout</span>';
     }
   };
 
   window.chatSelect = function (nodeId) {
     chatTarget = nodeId || null;
     var t = el("chat_title");
-    if (t)
-      t.textContent = chatTarget
-        ? "DM → " + chatTarget
-        : "#swarm · shared LAN room";
+    if (t) t.textContent = chatTarget ? "DM → " + chatTarget : "#swarm · shared room";
     lastHistSig = "";
     refreshChatHistory();
     refreshChatUsers();
@@ -152,19 +162,10 @@
   window.chatAddExternal = async function () {
     var nid = ((el("chat_external") && el("chat_external").value) || "").trim();
     if (!nid) return;
+    var fd = new FormData();
+    fd.append("node_id", nid);
     try {
-      await fetchT(
-        "/comms/chat/add_user",
-        {
-          method: "POST",
-          body: (function () {
-            var fd = new FormData();
-            fd.append("node_id", nid);
-            return fd;
-          })(),
-        },
-        8000
-      );
+      await fetchT("/comms/chat/add_user", { method: "POST", body: fd }, 8000);
     } catch (e) {}
     chatSelect(nid);
     if (el("chat_external")) el("chat_external").value = "";
@@ -202,14 +203,10 @@
           esc(m.text) +
           "</span></div>";
       }
-      if (!msgs.length)
-        h =
-          '<div class="muted">Shared window empty — first message lands on every peer with this Redis</div>';
+      if (!msgs.length) h = '<div class="muted">Shared window empty</div>';
       log.innerHTML = h;
       log.scrollTop = log.scrollHeight;
-    } catch (e) {
-      /* soft fail — next poll */
-    }
+    } catch (e) {}
   };
 
   window.chatSend = async function () {
@@ -219,15 +216,23 @@
     var body = { text: text, room: "swarm" };
     if (chatTarget) body.to = chatTarget;
     try {
-      var d = await jpost("/comms/chat/send", body, 10000);
+      var d = await fetchT(
+        "/comms/chat/send",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        10000
+      ).then(function (r) {
+        return r.json();
+      });
       if (input) input.value = "";
       lastHistSig = "";
       var o = el("comms_result");
       if (d.ok) {
         if (o) {
-          o.textContent = chatTarget
-            ? "DM sent → " + chatTarget
-            : "Posted to shared #swarm";
+          o.textContent = chatTarget ? "DM sent" : "Posted to #swarm";
           o.className = "success";
         }
         refreshChatHistory();
@@ -238,7 +243,7 @@
     } catch (e) {
       var o2 = el("comms_result");
       if (o2) {
-        o2.textContent = "send timeout — Redis/network slow";
+        o2.textContent = "send timeout";
         o2.className = "error";
       }
     }
@@ -254,13 +259,7 @@
         o.textContent = d.ok ? "Registered · peers " + (d.peers || 0) : d.error || "fail";
         o.className = d.ok ? "success" : "error";
       }
-    } catch (e) {
-      var o3 = el("comms_result");
-      if (o3) {
-        o3.textContent = "register timeout";
-        o3.className = "error";
-      }
-    }
+    } catch (e) {}
     refreshComms();
     refreshChatUsers();
   };
@@ -272,27 +271,40 @@
       if (x) x.textContent = d.env_export || JSON.stringify(d, null, 2);
       var o = el("comms_result");
       if (o) {
-        o.textContent = d.REDIS_URL
-          ? "Share this Redis with LAN peers for one chat window: " + d.REDIS_URL
-          : "export failed";
+        o.textContent = d.REDIS_URL ? "Export ready" : "export failed";
         o.className = d.REDIS_URL ? "success" : "error";
       }
-    } catch (e) {
-      var o4 = el("comms_result");
-      if (o4) {
-        o4.textContent = "export timeout";
-        o4.className = "error";
-      }
-    }
+    } catch (e) {}
   };
 
+  function ensureJoinButton() {
+    var card = el("comms_card");
+    if (!card) return;
+    var parent = card.parentNode;
+    if (!parent || el("btn_join_mesh")) return;
+    var btn = document.createElement("button");
+    btn.id = "btn_join_mesh";
+    btn.type = "button";
+    btn.textContent = "Join shared mesh";
+    btn.onclick = function () {
+      joinSharedMesh();
+    };
+    var section = parent.querySelector(".section");
+    if (section) section.insertBefore(btn, section.firstChild);
+  }
+
   function boot() {
+    ensureJoinButton();
     refreshComms();
     refreshChatUsers();
     refreshChatHistory();
     setInterval(refreshComms, 5000);
     setInterval(refreshChatUsers, 4000);
-    setInterval(refreshChatHistory, 1500); /* shared window feels live */
+    setInterval(refreshChatHistory, 1500);
+    /* auto-try join once after discovery window */
+    setTimeout(function () {
+      joinSharedMesh();
+    }, 10000);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
