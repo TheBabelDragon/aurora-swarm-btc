@@ -18,6 +18,7 @@ comms = CommsLayer(node_id="dashboard")
 
 _torrent_manager = None
 _anchor_service = None
+_fabric = None
 UPLOAD_DIR = Path(os.getenv("AURORA_UPLOAD_DIR", "/tmp/aurora_uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -46,6 +47,18 @@ def get_anchor():
             _anchor_service = False
     return _anchor_service if _anchor_service is not False else None
 
+def get_fabric():
+    global _fabric
+    if _fabric is None:
+        try:
+            from mods.asset_fabric.fabric import AssetFabric
+            _fabric = AssetFabric(comms)
+            logger.info("Dashboard AssetFabric online")
+        except Exception as e:
+            logger.debug(f"asset_fabric not available: {e}")
+            _fabric = False
+    return _fabric if _fabric is not False else None
+
 
 @app.get("/status")
 def status():
@@ -59,7 +72,7 @@ def status():
         "active_workers": len(workers) if workers else bus.get("worker_count", 0),
         "current_coin": bus.get("cluster:current_coin", "BTC"),
         "mood": "THEY YEARN FOR THE MINES" if entropy > 2.5 else "Patiently Hashing",
-        "message": "They do yearn. Mesh + Asset Fabric + optional attestation.",
+        "message": "They do yearn. Mesh + Asset Fabric + collective possession.",
         "comms_nodes_registered": len(comms.get_active_nodes())
     }
 
@@ -103,7 +116,7 @@ async def command_to_node(node_id: str, action: str = Form(...), factor: float =
     return {"status": "sent", "action": action, "target": node_id}
 
 # =====================================================================
-# ASSET TRANSFER + ATTESTATION API
+# ASSET TRANSFER + ATTESTATION + POSSESSION API
 # =====================================================================
 
 def _anchor_view(asset_id: str) -> Optional[Dict[str, Any]]:
@@ -127,7 +140,15 @@ def _anchor_view(asset_id: str) -> Optional[Dict[str, Any]]:
 @app.get("/torrent/status")
 def torrent_status():
     tm = get_torrent_manager()
+    fabric = get_fabric()
     torrent_nodes = comms.get_nodes_by_capability("torrent") if hasattr(comms, "get_nodes_by_capability") else []
+
+    # Publish what this node holds so others can see us
+    if fabric:
+        try:
+            fabric.publish_possession_snapshot()
+        except Exception:
+            pass
 
     local = []
     if tm:
@@ -140,6 +161,13 @@ def torrent_status():
             ih = t.get("infohash")
             if ih:
                 t["anchor"] = _anchor_view(ih)
+                if fabric:
+                    try:
+                        sp = fabric.swarm_possession(ih)
+                        t["holder_count"] = sp.get("holder_count", 0)
+                        t["holders"] = sp.get("holders", [])
+                    except Exception:
+                        t["holder_count"] = 1 if t.get("complete") else 0
 
     announced = []
     try:
@@ -170,6 +198,7 @@ def torrent_status():
         "announced_torrents": announced,
         "dashboard_has_manager": tm is not None,
         "dashboard_has_anchor": anc is not None,
+        "dashboard_has_fabric": fabric is not None,
     }
 
 @app.get("/torrent/list")
@@ -213,6 +242,13 @@ async def torrent_upload(
                     anchored = True
                 except Exception as e:
                     logger.warning(f"Anchor on upload failed: {e}")
+
+        fabric = get_fabric()
+        if fabric:
+            try:
+                fabric.publish_possession_snapshot()
+            except Exception:
+                pass
 
         logger.info(f"[DASH] Uploaded + announced {meta.infohash[:12]}… ({len(content)} bytes) anchored={anchored}")
         return {
@@ -275,7 +311,6 @@ async def torrent_cancel(infohash: str = Form(...)):
 
 @app.post("/torrent/anchor")
 async def torrent_anchor(infohash: str = Form(...)):
-    """Record a mesh content commitment for a known local asset."""
     anc = get_anchor()
     if not anc:
         return JSONResponse({"status": "error", "detail": "btc_anchor not available"}, status_code=400)
@@ -361,7 +396,7 @@ def root():
     </head>
     <body>
         <h1>🚀 Aurora Swarm BTC — Comms Operations Center</h1>
-        <p><strong>They yearn for the mines... and now their assets can be attested.</strong></p>
+        <p><strong>They yearn for the mines... and know who holds what.</strong></p>
 
         <div class="card">
             <h2>Swarm Status</h2>
@@ -382,7 +417,7 @@ def root():
             </div>
 
             <div class="section">
-                <h3>Download by Infohash</h3>
+                <h3>Download by Asset id</h3>
                 <input type="text" id="ensure_infohash" placeholder="infohash / asset id">
                 <input type="text" id="ensure_name" placeholder="optional name" style="width:160px">
                 <button onclick="ensureAsset()">Ensure / Download</button>
@@ -486,6 +521,7 @@ def root():
                     const pct = t.percent || 0;
                     const complete = !!t.complete;
                     const ih = t.infohash || '';
+                    const holders = t.holder_count != null ? `<span class="badge" title="${(t.holders||[]).join(', ')}">${t.holder_count} holder${t.holder_count===1?'':'s'}</span>` : '';
                     html += `<tr>
                         <td>
                             <strong>${t.name || '—'}</strong><br>
@@ -502,6 +538,7 @@ def root():
                             ${complete ? '<span class="badge ok">complete</span>' : '<span class="badge warn">downloading</span>'}
                             ${t.wanted && !complete ? '<span class="badge">wanted</span>' : ''}
                             ${anchorBadge(t.anchor)}
+                            ${holders}
                             ${t.pending ? `<span class="muted"> · ${t.pending} pending</span>` : ''}
                         </td>
                         <td class="row-actions">
@@ -525,6 +562,7 @@ def root():
                         `<span class="badge ok">${data.torrent_capable_nodes} torrent nodes</span>` +
                         (data.dashboard_has_manager ? ' <span class="badge ok">manager online</span>' : ' <span class="badge warn">no manager</span>') +
                         (data.dashboard_has_anchor ? ' <span class="badge anchor">anchor ready</span>' : '') +
+                        (data.dashboard_has_fabric ? ' <span class="badge ok">fabric</span>' : '') +
                         ` <span class="muted">· ${(data.downloading||[]).length} down · ${(data.seeding||[]).length} seed</span>`;
 
                     document.getElementById('downloading_list').innerHTML = renderTorrentTable(data.downloading || []);
@@ -704,4 +742,5 @@ def root():
 if __name__ == "__main__":
     get_torrent_manager()
     get_anchor()
+    get_fabric()
     uvicorn.run(app, host="0.0.0.0", port=8000)
