@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from fastapi import FastAPI, Form
 from fastapi.responses import JSONResponse
@@ -65,6 +65,16 @@ def mount_bvl_ops(app: FastAPI, *, get_comms: Callable[[], Any]):
                 tip_node=(tip_node.strip() if tip_node else None),
                 asset_id=asset_id.strip(),
             )
+        except Exception as e:
+            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+    @app.post("/bvl/attest_supply")
+    async def bvl_attest_supply():
+        try:
+            from mods.bvl.economy import EconomyReactor
+
+            reactor = EconomyReactor(get_comms())
+            return reactor.attest_supply()
         except Exception as e:
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 

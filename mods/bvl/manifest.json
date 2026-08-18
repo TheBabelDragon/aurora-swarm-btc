@@ -1,9 +1,9 @@
 {
   "name": "bvl",
   "type": "comms",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "entry": "entrypoint.py",
   "enabled": true,
   "dependencies": ["comms"],
-  "description": "Babel Value Ledger (BVL) — mesh-native swarm credits for seeding, attestation, and soft incentives"
+  "description": "Babel Value Ledger — live mesh credits that mint from seeding/attestation events"
 }
