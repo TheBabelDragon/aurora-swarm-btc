@@ -39,8 +39,19 @@ EXTRA_JS = r"""
     wrap.innerHTML='<h2>Mining</h2><div id="mine_status" class="muted">Checking miner…</div><div class="section"><button type="button" onclick="startMining()">Start mining</button><button type="button" class="danger" onclick="stopMining()">Stop mining</button></div><div id="mine_result" style="min-height:18px;margin-top:8px"></div><p class="muted">Pays out to <span class="mono" id="mine_wallet">…</span> via pool. CPU path needs no bfgminer.</p><h2 style="margin-top:18px">Fleet</h2><div id="fleet_card" class="muted">No worker telemetry yet.</div><h2 style="margin-top:18px">BVL transfer</h2><p class="muted">Mesh credit only. Type recipient id twice.</p><div class="section"><input id="xfer_to" placeholder="to node id"><input id="xfer_confirm" placeholder="confirm node id"><input id="xfer_amount" type="number" step="any" min="0" placeholder="amount" style="width:120px"><input id="xfer_memo" placeholder="memo"><label class="muted"><input type="checkbox" id="xfer_known"> require known node</label><button type="button" onclick="bvlTransferSafe()">Transfer BVL</button></div><div id="xfer_result" style="min-height:18px;margin-top:8px"></div>';
     host.parentNode.insertBefore(wrap, host.nextSibling);
   }
+  async function refreshStatusCard(){
+    try{
+      const s=await fetch('/status').then(r=>r.json());
+      const box=el('status');
+      if(!box) return;
+      const rate=s.hashrate_display||rateText(s.mining)||'0 H/s';
+      const mine=s.mining||{};
+      box.innerHTML='<div class="metric">'+(s.active_workers||0)+' workers</div><p>Entropy '+s.entropy+' · '+rate+' · '+(s.mood||'')+'</p><p class="muted">'+(mine.running?'mining via '+(mine.backend||'?')+' · ':'idle · ')+(mine.hashrate_display||rate)+'</p>';
+    }catch(e){}
+  }
   async function refreshFleet(){
     ensurePanels();
+    await refreshStatusCard();
     try{
       const d=await fetch('/mining/engine/status').then(r=>r.json());
       const local=d.local||{};
@@ -80,7 +91,7 @@ EXTRA_JS = r"""
     const out=el('mine_result');
     out.textContent=msg;
     out.className=ok?'success':'error';
-    setTimeout(refreshFleet,1000);
+    setTimeout(refreshFleet,1500);
   };
   window.stopMining=async function(){
     ensurePanels();
@@ -199,11 +210,7 @@ def install_ops_native(app: Any, *, get_comms: Callable[[], Any]):
         except Exception:
             pass
 
-        return {
-            "nodes": nodes_out,
-            "cluster_shares": shares,
-            "ts": time.time(),
-        }
+        return {"nodes": nodes_out, "cluster_shares": shares, "ts": time.time()}
 
     @app.post("/bvl/transfer_safe")
     async def bvl_transfer_safe(
