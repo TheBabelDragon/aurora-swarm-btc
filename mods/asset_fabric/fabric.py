@@ -5,8 +5,9 @@ Primary verb:
     fabric.ensure(asset_id | manifest, policy=...)
 
 Also:
-    fabric.swarm_possession(asset_id)  → which nodes hold it
-    fabric.publish_possession_snapshot() → advertise what this node holds
+    fabric.publish(..., important=True)  → RS encode + placement jobs
+    fabric.swarm_possession(asset_id)
+    fabric.publish_possession_snapshot()
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ from .manifest_model import AssetManifest
 
 logger = logging.getLogger("aurora.assets")
 
-POSSESSION_KEY = "asset:possession:"  # + node_id
-POSSESSION_TTL = 120  # seconds — nodes should refresh regularly
+POSSESSION_KEY = "asset:possession:"
+POSSESSION_TTL = 120
 
 
 class AssetFabric:
@@ -57,10 +58,6 @@ class AssetFabric:
             self._anchor = None
         return self._anchor
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def publish(
         self,
         path: str | Path,
@@ -70,6 +67,7 @@ class AssetFabric:
         provenance: Optional[Dict[str, Any]] = None,
         announce: bool = True,
         anchor: bool = False,
+        important: bool = False,
     ) -> Optional[str]:
         try:
             tm = self._transport()
@@ -77,8 +75,64 @@ class AssetFabric:
             if announce:
                 tm.announce(meta.infohash)
 
+            prov = dict(provenance or {})
+            if important:
+                try:
+                    from mods.asset_fabric.important import encode_and_plan, write_shards
+                    from mods.asset_fabric.repair import RepairPlanner, RedundancyPolicy
+                    from mods.asset_fabric.topology import TopologyRegistry, load_topology_from_mesh
+                    from mods.asset_fabric.possession_verify import PossessionTracker
+                    from comms.layer import SwarmMessage
+
+                    data = Path(path).read_bytes()
+                    topo = TopologyRegistry()
+                    load_topology_from_mesh(self.comms, topo)
+                    planner = RepairPlanner(PossessionTracker(), topo, RedundancyPolicy())
+                    candidates = []
+                    try:
+                        for n in (self.comms.get_active_nodes() or []):
+                            if isinstance(n, dict):
+                                candidates.append(n.get("node_id") or n.get("id"))
+                            elif isinstance(n, str):
+                                candidates.append(n)
+                    except Exception:
+                        pass
+                    pack = encode_and_plan(
+                        data,
+                        asset_id=meta.infohash,
+                        planner=planner,
+                        candidates=[c for c in candidates if c],
+                    )
+                    shard_dir = Path(tm.storage_dir) / "shards"
+                    paths = write_shards(shard_dir, meta.infohash, pack["shards"])
+                    prov["important"] = True
+                    prov["erasure"] = pack["encoding"]
+                    prov["shard_paths"] = paths
+                    prov["placement"] = pack.get("placement")
+                    placement = pack.get("placement") or {}
+                    for i, target in enumerate(placement.get("targets") or []):
+                        msg = SwarmMessage(
+                            type="asset.shard_place",
+                            payload={
+                                "asset_id": meta.infohash,
+                                "target": target,
+                                "shard_index": i,
+                                "action": "hold_shard",
+                                "source": self.node_id,
+                            },
+                            source=self.node_id,
+                            target=target,
+                        )
+                        self.comms.publish_message("asset.shard_place", msg)
+                    logger.info(
+                        f"Important asset RS-encoded shards={pack['encoding']['shard_count']} "
+                        f"code={pack['encoding']['code']}"
+                    )
+                except Exception as e:
+                    logger.warning(f"important RS path failed (asset still published): {e}")
+
             manifest = AssetManifest.from_torrent_meta(
-                meta, asset_type=asset_type, provenance=provenance
+                meta, asset_type=asset_type, provenance=prov
             )
             self._store_manifest(manifest)
 
@@ -93,7 +147,7 @@ class AssetFabric:
             self.publish_possession_snapshot()
             logger.info(
                 f"Published asset {manifest.fingerprint()}… type={asset_type} "
-                f"name={manifest.name} anchored={bool(anchor)}"
+                f"name={manifest.name} anchored={bool(anchor)} important={important}"
             )
             return manifest.asset_id
         except Exception as e:
@@ -115,8 +169,7 @@ class AssetFabric:
             if tm.is_complete(asset_id):
                 self.publish_possession_snapshot()
                 return True
-            ok = bool(tm.ensure_asset(infohash=asset_id))
-            return ok
+            return bool(tm.ensure_asset(infohash=asset_id))
         except Exception as e:
             logger.warning(f"ensure({asset_id[:12]}…) failed: {e}")
             return False
@@ -126,7 +179,6 @@ class AssetFabric:
         tm = self._transport()
         prog = tm.get_progress(asset_id)
         path = tm.get_path(asset_id)
-
         result: Dict[str, Any] = {
             "asset_id": asset_id,
             "complete": bool(prog.get("complete")),
@@ -140,7 +192,6 @@ class AssetFabric:
             "holders": None,
             "holder_count": None,
         }
-
         anc = self._get_anchor()
         if anc:
             try:
@@ -155,12 +206,10 @@ class AssetFabric:
                     }
             except Exception:
                 pass
-
         if include_swarm:
             swarm = self.swarm_possession(asset_id)
             result["holders"] = swarm.get("holders", [])
             result["holder_count"] = swarm.get("holder_count", 0)
-
         return result
 
     def list_assets(self) -> List[Dict[str, Any]]:
@@ -168,9 +217,8 @@ class AssetFabric:
         out = []
         for t in tm.list_torrents():
             aid = t.get("infohash")
-            if not aid:
-                continue
-            out.append(self.possession(aid))
+            if aid:
+                out.append(self.possession(aid))
         return out
 
     def get_manifest(self, asset_id: str) -> Optional[AssetManifest]:
@@ -192,17 +240,7 @@ class AssetFabric:
     def path(self, asset_id: str) -> Optional[Path]:
         return self._transport().get_path(str(asset_id).strip().lower())
 
-    # ------------------------------------------------------------------
-    # Swarm possession (collective view)
-    # ------------------------------------------------------------------
-
     def publish_possession_snapshot(self) -> Dict[str, Any]:
-        """
-        Advertise which complete assets this node currently holds.
-
-        Written to mesh state under asset:possession:<node_id> with a short TTL.
-        Call periodically (dashboard / worker loop) or after publish/complete.
-        """
         tm = self._transport()
         complete_ids = []
         names = {}
@@ -212,7 +250,6 @@ class AssetFabric:
                 complete_ids.append(aid)
                 if t.get("name"):
                     names[aid] = t["name"]
-
         payload = {
             "node_id": self.node_id,
             "assets": complete_ids,
@@ -227,11 +264,6 @@ class AssetFabric:
         return payload
 
     def swarm_possession(self, asset_id: str) -> Dict[str, Any]:
-        """
-        Aggregate which nodes claim to fully hold this asset.
-
-        Best-effort scan of asset:possession:* keys on the mesh.
-        """
         asset_id = str(asset_id).strip().lower()
         holders: List[str] = []
         try:
@@ -242,16 +274,12 @@ class AssetFabric:
                 if not isinstance(raw, dict):
                     continue
                 node = raw.get("node_id") or key.split(":")[-1]
-                assets = raw.get("assets") or []
-                if asset_id in assets:
+                if asset_id in (raw.get("assets") or []):
                     holders.append(str(node))
         except Exception as e:
             logger.debug(f"swarm_possession scan failed: {e}")
-
-        # Always include self if we hold it
         if self.is_complete(asset_id) and self.node_id not in holders:
             holders.append(self.node_id)
-
         return {
             "asset_id": asset_id,
             "holders": sorted(set(holders)),
@@ -259,9 +287,6 @@ class AssetFabric:
         }
 
     def list_swarm_assets(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Coarse inventory: union of all assets reported in possession snapshots.
-        """
         inventory: Dict[str, Dict[str, Any]] = {}
         try:
             keys = self.comms.r.keys(f"aurora:{POSSESSION_KEY}*") if hasattr(self.comms, "r") else []
@@ -274,18 +299,13 @@ class AssetFabric:
                 names = raw.get("names") or {}
                 for aid in raw.get("assets") or []:
                     if aid not in inventory:
-                        inventory[aid] = {
-                            "asset_id": aid,
-                            "name": names.get(aid),
-                            "holders": [],
-                        }
+                        inventory[aid] = {"asset_id": aid, "name": names.get(aid), "holders": []}
                     if node not in inventory[aid]["holders"]:
                         inventory[aid]["holders"].append(node)
                     if not inventory[aid].get("name") and names.get(aid):
                         inventory[aid]["name"] = names[aid]
         except Exception as e:
             logger.debug(f"list_swarm_assets failed: {e}")
-
         out = []
         for aid, row in list(inventory.items())[:limit]:
             row["holder_count"] = len(row["holders"])
