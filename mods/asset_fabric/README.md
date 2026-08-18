@@ -2,37 +2,40 @@
 
 **Content-addressed swarm Asset Fabric**
 
-## Design principle
-
 > Aurora does not require every node to be trustworthy.
 > It requires every piece of state to be verifiable.
 
 See [docs/BYZANTINE_DATA_PLANE.md](../../docs/BYZANTINE_DATA_PLANE.md).
 
-## Public verbs
-
-```python
-fabric.publish(path)
-fabric.ensure(asset_id)
-fabric.possession(asset_id)
-fabric.swarm_possession(asset_id)  # claimed holders (mesh snapshots)
-```
-
-## Byzantine foundation modules
+## Modules
 
 | Module | Role |
 |--------|------|
-| `merkle_pieces` | Piece Merkle root + inclusion proofs |
-| `peer_evidence` | Local PeerScore; crypto fail ≠ timeout |
-| `possession_verify` | Claimed vs challenge-verified possession |
+| `fabric` | publish / ensure / possession |
+| `merkle_pieces` | piece Merkle root + proofs |
+| `peer_evidence` | local PeerScore |
+| `possession_verify` | claimed vs verified |
+| `challenge` | mesh piece challenges |
+| `erasure` | N+M shard encode/decode foundation |
 
-**Rule:** reputation ranks peers; hashes decide truth.
+## Challenge
 
-## Roadmap (content layer)
+```python
+from mods.asset_fabric.challenge import PieceChallenger
 
-1. ~~Manifest + piece hashes~~
-2. Merkle proofs on piece receive ← foundation landed
-3. Wire torrent transport to reject invalid pieces + PeerScore
-4. Erasure coding (N+M) for important assets
-5. Topology-aware placement policy
-6. State-root attestation epochs → Bitcoin
+ok = challenger.challenge(asset_id, piece_index=11, target_node="worker-02")
+# True → verified possession upgraded; PeerScore success
+# False → failed challenge / timeout / invalid bytes
+```
+
+## Erasure coding
+
+```python
+from mods.asset_fabric.erasure import encode, decode
+
+enc = encode(data, n_data=4, n_parity=2)
+# distribute enc["shards"] across failure domains
+# recover with decode(shards_or_none, ...)
+```
+
+`xor_parity_v1` is a stopgap. Prefer Reed-Solomon before adversarial loss models.
