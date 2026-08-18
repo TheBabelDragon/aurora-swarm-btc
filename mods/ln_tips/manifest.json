@@ -1,0 +1,9 @@
+{
+  "name": "ln_tips",
+  "type": "comms",
+  "version": "0.1.0",
+  "entry": "entrypoint.py",
+  "enabled": true,
+  "dependencies": ["comms", "asset_fabric"],
+  "description": "Lightning seeder tips — mesh ledger + pluggable tipper (log / LND REST)"
+}
