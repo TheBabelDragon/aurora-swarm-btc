@@ -1,57 +1,50 @@
-# asset_fabric  v0.1.1
+# asset_fabric  v0.1.2
 
 **Content-addressed swarm Asset Fabric**
 
-This is the durable systems abstraction.  
-`torrent_protocol` is the current transport implementation.  
-`btc_anchor` is the optional attestation layer.
-
-## Why this exists
+## Public verbs
 
 ```python
 from mods.asset_fabric.fabric import AssetFabric
 
 fabric = AssetFabric(comms)
 
-# Publish into the swarm
-asset_id = fabric.publish("/path/to/model.pt", asset_type="model")
-
-# Publish + request mesh attestation (soft dependency on btc_anchor)
 asset_id = fabric.publish("/path/to/model.pt", asset_type="model", anchor=True)
+fabric.ensure(asset_id)
 
-# Ensure this node possesses it
-fabric.ensure(asset_id, policy={"priority": "high"})
-
-# Possession view (includes anchor status when available)
+# Local view
 print(fabric.possession(asset_id))
+
+# Swarm view — who holds this?
+print(fabric.swarm_possession(asset_id))
+# → { asset_id, holders: ["node-A", "node-B"], holder_count: 2 }
+
+# Advertise what this node holds (call periodically)
+fabric.publish_possession_snapshot()
 ```
 
-## Core objects
+## Swarm possession
 
-### AssetManifest
-Immutable, content-addressed descriptor.
+Each node writes a short-TTL snapshot:
 
-### AssetFabric
-| Verb | Meaning |
-|------|--------|
-| `publish(path, …, anchor=False)` | Create asset + announce; optionally attest |
-| `ensure(asset_id\|manifest, policy=…)` | Make this node possess the asset |
-| `possession(asset_id)` | Local completeness + optional anchor view |
-| `list_assets()` | Everything known locally |
-| `get_manifest(asset_id)` | Durable manifest if stored |
+```
+asset:possession:<node_id> → { assets: [...], names: {...}, updated_at }
+```
+
+`swarm_possession` / `list_swarm_assets` scan those keys.  
+This is the foundation for replication policy and “move compute toward data.”
 
 ## Layering
 
 ```
-AssetFabric          ← durable public language
-    │
-    ├── TorrentManager   ← piece transport
-    └── AssetAnchor      ← optional attestation (btc_anchor)
-            │
-            ▼
-     CommsLayer mesh  →  (later) Bitcoin settlement
+AssetFabric
+  ├── TorrentManager   (piece transport)
+  └── AssetAnchor      (optional attestation)
+         │
+         ▼
+  CommsLayer mesh  →  collective possession map
 ```
 
 ## Status
 
-v0.1.1 — ensure/publish/possession + optional anchor path. Still experimental (mods/).
+v0.1.2 — ensure/publish/possession + swarm holder view. Still experimental (mods/).
