@@ -1,4 +1,4 @@
-"""Rewrite embedded dashboard JS so status uses hashrate_display (no TH/s-only flicker)."""
+"""Rewrite dashboard HTML/JS: hashrate_display + BVL button no longer calls open mint."""
 
 from __future__ import annotations
 
@@ -10,21 +10,6 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger("aurora-dashboard.html_fix")
-
-OLD = (
-    "document.getElementById('status').innerHTML=`<div class=\"metric\">${s.active_workers} workers</div>"
-    "<p>Entropy ${s.entropy} · ${s.total_ths} TH/s · ${s.mood}</p>`;"
-)
-# compact form as in file (with space before document)
-OLD2 = (
-    "document.getElementById('status').innerHTML=`<div class=\"metric\">${s.active_workers} workers</div>"
-    "<p>Entropy ${s.entropy} · ${s.total_ths} TH/s · ${s.mood}</p>`;"
-)
-NEW = (
-    "const rate=s.hashrate_display||(s.mining&&s.mining.hashrate_display)||'0 H/s';"
-    "document.getElementById('status').innerHTML=`<div class=\"metric\">${s.active_workers} workers</div>"
-    "<p>Entropy ${s.entropy} · ${rate} · ${s.mood}</p>`;"
-)
 
 
 class StatusJsFixMiddleware(BaseHTTPMiddleware):
@@ -40,14 +25,26 @@ class StatusJsFixMiddleware(BaseHTTPMiddleware):
             body += chunk
         try:
             text = body.decode("utf-8", errors="ignore")
-            if "total_ths} TH/s" in text and "hashrate_display" not in text.split("getElementById('status')")[1][:200]:
+            if "${s.total_ths} TH/s" in text:
                 text = text.replace(
                     "${s.total_ths} TH/s",
-                    "${s.hashrate_display||s.mining?.hashrate_display||(s.total_ths+' TH/s')}",
+                    "${s.hashrate_display||(s.mining&&s.mining.hashrate_display)||'0 H/s'}",
                     1,
                 )
-                body = text.encode("utf-8")
-                logger.info("status JS hashrate_display rewrite applied")
+            # Open mint removed — wire button to honest message
+            if "/bvl/reward_seed" in text:
+                text = text.replace(
+                    "async function bvlRewardSeed(){const ih=document.getElementById('ensure_infohash').value.trim();const fd=new FormData();if(ih)fd.append('asset_id',ih);\n"
+                    "const data=await fetch('/bvl/reward_seed',{method:'POST',body:fd}).then(r=>r.json());showT(data.ok||data.status==='ok'?`BVL scored`:(data.error||data.detail||'fail'),!!(data.ok||data.status==='ok'));setTimeout(refresh,400)}",
+                    "async function bvlRewardSeed(){showT('BVL mints only from swarm work (asset complete / anchor) — not a button',false)}",
+                )
+                # fallback shorter replace if formatting differs
+                if "/bvl/reward_seed" in text:
+                    text = text.replace(
+                        "fetch('/bvl/reward_seed'",
+                        "fetch('/mining/yearn'",
+                    )
+            body = text.encode("utf-8")
         except Exception as e:
             logger.debug(f"html fix: {e}")
         headers = dict(response.headers)
