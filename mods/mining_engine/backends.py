@@ -1,4 +1,4 @@
-"""Miner backends — bfgminer when present, else pure-Python stratum CPU."""
+"""Miner backends — bfgminer when present, else full-core CPU stratum."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class MinerConfig:
     intensity: str = "19"
     gpus: int = 1
     binary: str = "bfgminer"
-    cpu_threads: int = 0
+    cpu_threads: int = 0  # 0 = all cores
     coin: str = "BTC"
     comms: Any = field(default=None, repr=False)
 
@@ -126,7 +126,8 @@ class CpuStratumBackend:
 
         threads = self.cfg.cpu_threads
         if threads <= 0:
-            threads = max(1, min(4, (os.cpu_count() or 2)))
+            # all logical cores — put the machine to work
+            threads = os.cpu_count() or 2
         user = f"{self.cfg.wallet}.{self.cfg.worker_name}"
         self._miner = StratumCpuMiner(
             pool_url=self.cfg.pool_url,
@@ -139,7 +140,7 @@ class CpuStratumBackend:
         )
         ok = self._miner.start()
         if ok:
-            logger.info(f"CPU stratum started user={user[:24]}… coin={self.cfg.coin}")
+            logger.info(f"CPU FULL POWER user={user[:24]}… workers={threads}")
         return ok
 
     def stop(self, timeout: float = 10.0):
@@ -157,7 +158,9 @@ class CpuStratumBackend:
         self.cfg.intensity = str(intensity)
         try:
             i = int(float(intensity))
-            self.cfg.cpu_threads = max(1, min(16, i - 12))
+            # intensity 14–25 maps toward more workers
+            cpus = os.cpu_count() or 2
+            self.cfg.cpu_threads = max(1, min(cpus * 2, max(cpus, i - 10)))
         except Exception:
             pass
 
@@ -172,5 +175,5 @@ def select_backend(cfg: MinerConfig):
     if bfg.available():
         logger.info("backend: bfgminer")
         return bfg
-    logger.info("backend: cpu_stratum (bfgminer not found)")
+    logger.info("backend: cpu_stratum full-core")
     return CpuStratumBackend(cfg)
