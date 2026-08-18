@@ -1,5 +1,6 @@
 """
-MiningEngine — tandem brain around a real hasher (bfgminer).
+MiningEngine — tandem brain around a hasher.
+Backend: bfgminer if present, else pure-Python stratum CPU (always available).
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import time
 from typing import Any, Optional
 
 from .adaptive import AdaptiveIntensity
-from .backends import BfgminerBackend, MinerConfig
+from .backends import MinerConfig, select_backend
 from .coordinator import MiningCoordinator
 from .defaults import DEFAULT_INTENSITY, DEFAULT_MINING_WALLET, DEFAULT_POOL_URL
 from .share_pipeline import SharePipeline
@@ -32,8 +33,9 @@ class MiningEngine:
             intensity=str(kwargs.get("intensity") or os.getenv("INTENSITY", DEFAULT_INTENSITY)),
             gpus=int(kwargs.get("gpus") or os.getenv("GPUS_PER_POD", "1")),
             binary=kwargs.get("binary") or os.getenv("BFGMINER_BIN", "bfgminer"),
+            cpu_threads=int(kwargs.get("cpu_threads") or os.getenv("AURORA_CPU_THREADS", "0") or 0),
         )
-        self.backend = BfgminerBackend(self.cfg)
+        self.backend = select_backend(self.cfg)
         self.pipeline = SharePipeline(
             comms,
             worker_id=self.worker_id,
@@ -46,7 +48,11 @@ class MiningEngine:
         self.paused = False
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._adaptive_enabled = os.getenv("AURORA_MINING_ADAPTIVE", "1") not in ("0", "false", "no")
+        # Adaptive intensity only meaningful for bfgminer GPU path
+        self._adaptive_enabled = (
+            getattr(self.backend, "kind", "") == "bfgminer"
+            and os.getenv("AURORA_MINING_ADAPTIVE", "1") not in ("0", "false", "no")
+        )
         self._last_adapt = 0.0
 
     def _on_hashrate(self, gh: float):
@@ -60,6 +66,7 @@ class MiningEngine:
                 "running": self.backend.running(),
                 "pool": self.cfg.pool_url,
                 "wallet": self.cfg.wallet,
+                "backend": getattr(self.backend, "kind", "unknown"),
             },
         )
 
@@ -74,17 +81,19 @@ class MiningEngine:
 
     def stop(self):
         self.paused = True
+        self._stop.set()
         self.backend.stop()
 
     def restart(self):
         self.stop()
-        time.sleep(2)
+        time.sleep(1)
+        self._stop.clear()
         return self.start()
 
     def set_intensity(self, intensity: str):
         self.cfg.intensity = str(intensity)
         self.backend.set_intensity(str(intensity))
-        if self.backend.running():
+        if self.backend.running() and getattr(self.backend, "kind", "") == "bfgminer":
             self.restart()
 
     def status(self) -> dict:
@@ -96,6 +105,7 @@ class MiningEngine:
             "pool": self.cfg.pool_url,
             "wallet": self.cfg.wallet,
             "wallet_set": bool(self.cfg.wallet),
+            "backend": getattr(self.backend, "kind", "unknown"),
             "backend_available": self.backend.available(),
             "adaptive": self._adaptive_enabled,
             **self.pipeline.snapshot(),
@@ -118,7 +128,7 @@ class MiningEngine:
             try:
                 line = stream.readline()
                 if not line:
-                    time.sleep(0.2)
+                    time.sleep(0.05)
                     continue
                 self.pipeline.handle_line(line)
             except Exception as e:
@@ -143,6 +153,7 @@ class MiningEngine:
                         "status": "mining" if self.backend.running() else "stopped",
                         "intensity": self.cfg.intensity,
                         "hashrate_ghs": self.pipeline.last_hashrate_ghs,
+                        "backend": getattr(self.backend, "kind", "unknown"),
                     }
                 )
             except Exception:
