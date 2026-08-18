@@ -1,9 +1,5 @@
 """
-Pure-Python Bitcoin stratum miner (CPU SHA256d).
-
-No bfgminer / OpenCL required. Hashrate is modest; shares still go to the
-pool under wallet.worker when difficulty is met. This is real mining,
-not a simulation — just not GPU-class throughput.
+Pure-Python Bitcoin stratum miner (CPU SHA256d) + job ledger hooks.
 """
 
 from __future__ import annotations
@@ -34,11 +30,8 @@ def _parse_pool(url: str) -> Tuple[str, int, bool]:
 
 
 def _diff_to_target(diff: float) -> int:
-    # target = target1 / difficulty  (simplified; target1 = 0x1d00ffff compact range)
-    # Use standard float approach used by many CPU miners
     if diff <= 0:
         diff = 1.0
-    # 0x00000000FFFF0000... max target for diff 1 (truncated 256-bit as int)
     max_target = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
     return int(max_target / diff)
 
@@ -49,8 +42,6 @@ def _hexrev(h: str) -> bytes:
 
 
 class StratumCpuMiner:
-    """Minimal stratum client + multi-thread CPU hasher."""
-
     def __init__(
         self,
         pool_url: str,
@@ -58,12 +49,16 @@ class StratumCpuMiner:
         password: str = "x",
         threads: int = 2,
         line_queue: Optional[queue.Queue] = None,
+        comms: Any = None,
+        coin: str = "BTC",
     ):
         self.pool_url = pool_url
         self.username = username
         self.password = password
         self.threads = max(1, min(threads, 32))
         self.lines: queue.Queue = line_queue if line_queue is not None else queue.Queue(maxsize=500)
+        self.comms = comms
+        self.coin = coin
         self._sock: Optional[socket.socket] = None
         self._stop = threading.Event()
         self._job_lock = threading.Lock()
@@ -97,7 +92,7 @@ class StratumCpuMiner:
         try:
             self._sock = socket.create_connection((host, port), timeout=20)
             self._sock.settimeout(30)
-            self._rpc("mining.subscribe", ["aurora-cpu/0.1"])
+            self._rpc("mining.subscribe", ["aurora-cpu/0.2"])
             self._rpc("mining.authorize", [self.username, self.password])
             self._emit(f"Connected {host}:{port} as {self.username}")
             return True
@@ -127,6 +122,18 @@ class StratumCpuMiner:
                         "ntime": params[7],
                         "clean": params[8] if len(params) > 8 else True,
                     }
+                # Job ledger — yearn metric
+                if self.comms is not None:
+                    try:
+                        from .job_ledger import JobLedger
+
+                        host, _, _ = _parse_pool(self.pool_url)
+                        entry = JobLedger(self.comms).record(
+                            params, coin=self.coin, pool_host=host
+                        )
+                        self._emit(f"Job score={entry.get('score')} id={entry.get('job_id')}")
+                    except Exception as e:
+                        logger.debug(f"job ledger: {e}")
         elif method == "mining.set_difficulty":
             try:
                 self._difficulty = float((msg.get("params") or [1])[0])
@@ -134,7 +141,6 @@ class StratumCpuMiner:
             except Exception:
                 pass
         elif msg.get("id") is not None and "result" in msg:
-            # subscribe result: [ [subs], extranonce1, extranonce2_size ]
             res = msg.get("result")
             if isinstance(res, list) and len(res) >= 3 and isinstance(res[1], str):
                 self._extranonce1 = res[1]
@@ -144,8 +150,6 @@ class StratumCpuMiner:
                     self._extranonce2_size = 4
             if msg.get("result") is True:
                 self._emit("Authorized")
-            if msg.get("error"):
-                self._emit(f"RPC error {msg.get('error')}")
 
     def _reader_loop(self):
         buf = ""
@@ -168,7 +172,12 @@ class StratumCpuMiner:
                 break
 
     def _build_header(self, job: Dict[str, Any], extranonce2: bytes, nonce: int) -> bytes:
-        coinbase = bytes.fromhex(job["coinb1"]) + bytes.fromhex(self._extranonce1) + extranonce2 + bytes.fromhex(job["coinb2"])
+        coinbase = (
+            bytes.fromhex(job["coinb1"])
+            + bytes.fromhex(self._extranonce1)
+            + extranonce2
+            + bytes.fromhex(job["coinb2"])
+        )
         merkle = _sha256d(coinbase)
         for branch in job["merkle"]:
             merkle = _sha256d(merkle + bytes.fromhex(branch))
@@ -204,12 +213,10 @@ class StratumCpuMiner:
                     break
                 h = _sha256d(header)
                 self._hashes += 1
-                # hash as little-endian uint256
                 val = int.from_bytes(h[::-1], "big")
                 if val <= target:
-                    en2_hex = extranonce2.hex()
-                    self._submit(job, en2_hex, nonce)
-                    self._emit(f"Accepted share? nonce={nonce} job={job['job_id']}")
+                    self._submit(job, extranonce2.hex(), nonce)
+                    self._emit(f"Share submitted nonce={nonce} job={job['job_id']}")
 
     def _submit(self, job: Dict[str, Any], extranonce2_hex: str, nonce: int):
         try:
@@ -256,7 +263,7 @@ class StratumCpuMiner:
             t = threading.Thread(target=self._mine_loop, args=(i,), name=f"cpu-mine-{i}", daemon=True)
             t.start()
             self._workers.append(t)
-        self._emit(f"CPU stratum miner started threads={self.threads}")
+        self._emit(f"CPU stratum miner started threads={self.threads} coin={self.coin}")
         return True
 
     def stop(self):
