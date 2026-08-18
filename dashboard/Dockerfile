@@ -6,10 +6,8 @@ WORKDIR /app
 COPY dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Dashboard package (ops routers included)
+# Full dashboard package + core + mods
 COPY dashboard/ ./dashboard/
-
-# Runtime deps used by fabric / mining / bvl / torrent
 COPY control/ ./control/
 COPY comms/ ./comms/
 COPY mods/ ./mods/
@@ -18,4 +16,5 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "dashboard.dashboard:app", "--host", "0.0.0.0", "--port", "8000"]
+# ship.py installs fabric/mining/bvl/btc routers then serves app
+CMD ["python", "-m", "uvicorn", "dashboard.ship:app", "--host", "0.0.0.0", "--port", "8000"]
