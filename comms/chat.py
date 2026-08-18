@@ -1,9 +1,5 @@
 """
-Mesh chat over shared Redis.
-
-- Broadcast room: aurora:chat:room:swarm
-- DM thread: aurora:chat:dm:{sorted(a,b)}
-- Index of known handles: aurora:chat:users
+Mesh chat over shared Redis — room + DM with durable history.
 """
 
 from __future__ import annotations
@@ -22,28 +18,30 @@ MAX_HISTORY = 500
 
 
 def _dm_key(a: str, b: str) -> str:
-    x, y = sorted([a.strip(), b.strip()])
+    x, y = sorted([(a or "").strip(), (b or "").strip()])
     return f"chat:dm:{x}:{y}"
 
 
 def _room_key(room: str = ROOM) -> str:
-    return f"chat:room:{room}"
+    return f"chat:room:{(room or ROOM).strip() or ROOM}"
 
 
 class MeshChat:
     def __init__(self, comms: CommsLayer):
         self.comms = comms
-        self.me = comms.node_id
+        self.me = (comms.node_id or "unknown").strip()
 
-    def _append(self, key: str, msg: Dict[str, Any]):
+    def _append(self, key: str, msg: Dict[str, Any]) -> bool:
         full = f"aurora:{key}"
         try:
             pipe = self.comms.r.pipeline()
             pipe.rpush(full, json.dumps(msg))
             pipe.ltrim(full, -MAX_HISTORY, -1)
             pipe.execute()
+            return True
         except Exception as e:
-            logger.warning(f"chat append: {e}")
+            logger.warning(f"chat append {full}: {e}")
+            return False
 
     def _history(self, key: str, limit: int = 50) -> List[Dict[str, Any]]:
         full = f"aurora:{key}"
@@ -57,7 +55,7 @@ class MeshChat:
                     out.append({"text": str(item)})
             return out
         except Exception as e:
-            logger.debug(f"chat history: {e}")
+            logger.debug(f"chat history {full}: {e}")
             return []
 
     def remember_user(self, node_id: str, display: Optional[str] = None, source: str = "mesh"):
@@ -77,22 +75,17 @@ class MeshChat:
                     }
                 ),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"remember_user: {e}")
 
     def list_users(self) -> List[Dict[str, Any]]:
-        """Online mesh + LAN discovery + remembered external handles."""
         users: Dict[str, Dict[str, Any]] = {}
-
-        # Self
         users[self.me] = {
             "node_id": self.me,
             "display": self.me,
             "source": "self",
             "online": True,
         }
-
-        # Redis mesh registry
         try:
             for n in self.comms.get_active_nodes() or []:
                 nid = (n.get("node_id") or "").strip()
@@ -109,8 +102,6 @@ class MeshChat:
                 self.remember_user(nid, source="mesh")
         except Exception:
             pass
-
-        # LAN discovery beacons
         try:
             from comms.discovery import get_discovery
 
@@ -131,8 +122,6 @@ class MeshChat:
                     self.remember_user(nid, source="lan")
         except Exception:
             pass
-
-        # Remembered / external
         try:
             raw = self.comms.r.hgetall("aurora:chat:users") or {}
             for nid, val in raw.items():
@@ -148,7 +137,6 @@ class MeshChat:
                 users[nid] = info
         except Exception:
             pass
-
         return sorted(users.values(), key=lambda u: (not u.get("online"), u.get("node_id") or ""))
 
     def search_users(self, q: str) -> List[Dict[str, Any]]:
@@ -176,11 +164,14 @@ class MeshChat:
             text = text[:4000]
 
         to = (to or "").strip() or None
+        if to and to == self.me:
+            return {"ok": False, "error": "cannot DM yourself"}
+
         msg = {
-            "id": f"{self.me}-{int(time.time()*1000)}",
+            "id": f"{self.me}-{int(time.time() * 1000)}",
             "from": self.me,
             "to": to or "*",
-            "room": room if not to else None,
+            "room": None if to else (room or ROOM),
             "text": text,
             "ts": time.time(),
         }
@@ -188,25 +179,25 @@ class MeshChat:
         if to:
             self.remember_user(to, source="external")
             key = _dm_key(self.me, to)
-            self._append(key, msg)
-            channel = f"chat.dm.{to}"
-            # also notify sender's mirror channel for multi-tab
+            if not self._append(key, msg):
+                return {"ok": False, "error": "redis write failed — is Redis up?", "key": key}
             try:
                 sm = SwarmMessage(type="chat.dm", payload=msg, source=self.me, target=to)
-                self.comms.publish_message(channel, sm)
+                self.comms.publish_message(f"chat.dm.{to}", sm)
                 self.comms.publish_message(f"chat.dm.{self.me}", sm)
             except Exception as e:
                 logger.debug(f"dm publish: {e}")
-        else:
-            key = _room_key(room)
-            self._append(key, msg)
-            try:
-                sm = SwarmMessage(type="chat.room", payload=msg, source=self.me)
-                self.comms.publish_message(f"chat.room.{room}", sm)
-            except Exception as e:
-                logger.debug(f"room publish: {e}")
+            return {"ok": True, "message": msg, "thread": key}
 
-        return {"ok": True, "message": msg}
+        key = _room_key(room)
+        if not self._append(key, msg):
+            return {"ok": False, "error": "redis write failed — is Redis up?", "key": key}
+        try:
+            sm = SwarmMessage(type="chat.room", payload=msg, source=self.me)
+            self.comms.publish_message(f"chat.room.{room or ROOM}", sm)
+        except Exception as e:
+            logger.debug(f"room publish: {e}")
+        return {"ok": True, "message": msg, "thread": key}
 
     def history(
         self,

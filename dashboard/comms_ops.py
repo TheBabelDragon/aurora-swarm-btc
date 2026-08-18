@@ -1,4 +1,4 @@
-"""Comms Layer — mesh status, discovery, export, live chat."""
+"""Comms Layer — mesh status, discovery, export, live chat (Form + JSON)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 import time
 from typing import Any, Callable, Optional
 
-from fastapi import Form, Query
+from fastapi import Form, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 logger = logging.getLogger("aurora-dashboard.comms_ops")
@@ -52,7 +52,6 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             peers = comms.get_active_nodes() or []
         except Exception as e:
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
-
         total_hs = 0.0
         for n in peers:
             nid = n.get("node_id") or ""
@@ -67,7 +66,6 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
                     hs = None
             if hs:
                 total_hs += float(hs)
-
         lan = []
         try:
             from comms.discovery import get_discovery
@@ -77,7 +75,6 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
                 lan = d.snapshot_peers()
         except Exception:
             pass
-
         return {
             "status": "ok",
             "redis_ok": redis_ok,
@@ -180,13 +177,11 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
                 source=comms.node_id,
             )
             comms.publish_message("events", msg)
-            # also as swarm chat
             _chat().send(message, to=None)
             return {"ok": True, "published": True, "message": message}
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-    # —— Live chat ——
     @app.get("/comms/chat/users")
     def chat_users(q: str = Query("")):
         try:
@@ -214,18 +209,29 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.post("/comms/chat/send")
-    async def chat_send(
-        text: str = Form(...),
-        to: str = Form(""),
-        room: str = Form("swarm"),
-    ):
+    async def chat_send(request: Request):
+        """Accept form-urlencoded OR JSON so DM never silently fails."""
         try:
-            to_n = (to or "").strip() or None
-            out = _chat().send(text, to=to_n, room=room or "swarm")
+            text = ""
+            to_n = None
+            room = "swarm"
+            ctype = (request.headers.get("content-type") or "").lower()
+            if "application/json" in ctype:
+                body = await request.json()
+                text = str(body.get("text") or "")
+                to_n = (str(body.get("to") or "")).strip() or None
+                room = str(body.get("room") or "swarm")
+            else:
+                form = await request.form()
+                text = str(form.get("text") or "")
+                to_n = (str(form.get("to") or "")).strip() or None
+                room = str(form.get("room") or "swarm")
+            out = _chat().send(text, to=to_n, room=room)
             if not out.get("ok"):
                 return JSONResponse(out, status_code=400)
             return out
         except Exception as e:
+            logger.exception("chat send")
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.post("/comms/chat/add_user")

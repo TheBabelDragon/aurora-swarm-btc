@@ -1,4 +1,4 @@
-"""Mount ops + comms + node command center + mining + mesh."""
+"""Mount ops — additive only; never remove working routes."""
 from __future__ import annotations
 
 import logging
@@ -26,6 +26,14 @@ def boot(
         install_html_fix(app)
     except Exception as e:
         logger.warning(f"html_fix: {e}")
+
+    # Identity FIRST so /btc/identity/register always exists
+    try:
+        from dashboard.identity_fix import install_identity_routes
+
+        install_identity_routes(app, get_comms=get_comms, get_identity=get_identity)
+    except Exception as e:
+        logger.warning(f"identity_fix: {e}")
 
     try:
         from dashboard.mount_all import mount_optional_ops
@@ -117,7 +125,6 @@ def boot(
     except Exception as e:
         logger.warning(f"mesh_heartbeat: {e}")
 
-    # Persist hardware-associated identity on shared mesh
     try:
         if get_identity:
             ident = get_identity()

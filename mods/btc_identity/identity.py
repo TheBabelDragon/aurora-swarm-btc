@@ -1,8 +1,5 @@
 """
 Bitcoin-style node identity for the Aurora mesh.
-
-Attaches a stable fingerprint / address-style label and optional signed
-claims to node registration metadata so peers can recognize recurring nodes.
 """
 
 from __future__ import annotations
@@ -45,7 +42,7 @@ class NodeIdentity:
         return body
 
     def register_with_identity(self, capabilities: Optional[list] = None, metadata: Optional[Dict] = None):
-        """Re-register on the mesh with identity metadata attached."""
+        """Re-register on the mesh with identity metadata attached. Never wipe prior caps."""
         meta = dict(metadata or {})
         claim = self.claim_payload()
         meta["btc_identity"] = {
@@ -62,28 +59,29 @@ class NodeIdentity:
                 prev = self.comms.get_state(f"node:{self.node_id}") or {}
                 if isinstance(prev, dict):
                     existing = list(prev.get("capabilities") or [])
-                    # keep prior metadata keys (e.g. torrent_version) unless overwritten
                     for k, v in (prev.get("metadata") or {}).items():
                         meta.setdefault(k, v)
             except Exception:
                 pass
-            # Always union — never wipe torrent/dashboard/etc.
             caps = list(dict.fromkeys(existing + list(capabilities or []) + ["btc_identity"]))
-            if self.node_id == "dashboard" and "dashboard" not in caps:
+            if "dashboard" not in caps:
                 caps.append("dashboard")
             self.comms.register_node(
-                node_type="worker",
+                node_type="dashboard",
                 capabilities=caps,
                 metadata=meta,
             )
+            # Persistent on shared Redis
             self.comms.set_state(
                 f"node:identity:{self.node_id}",
                 meta["btc_identity"],
-                expire=600,
+                expire=0,
             )
             logger.info(f"Registered identity for {self.node_id} caps={caps}")
+            return meta["btc_identity"]
         except Exception as e:
             logger.warning(f"register_with_identity failed: {e}")
+            raise
 
     def identity_view(self) -> Dict[str, Any]:
         return {
@@ -93,3 +91,7 @@ class NodeIdentity:
             "backend": self.key.backend,
             "public_hex": self.key.public_hex[:24] + "…",
         }
+
+
+# Back-compat alias — old dashboard imported IdentityService
+IdentityService = NodeIdentity
