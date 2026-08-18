@@ -1,4 +1,4 @@
-"""Miner backends — bfgminer or reliable CPU stratum."""
+"""Miner backends — CPU path oversubscribes cores for higher util."""
 
 from __future__ import annotations
 
@@ -24,6 +24,14 @@ class MinerConfig:
     cpu_threads: int = 0
     coin: str = "BTC"
     comms: Any = field(default=None, repr=False)
+
+
+def _default_workers() -> int:
+    cpus = os.cpu_count() or 2
+    # Oversubscribe: pure-Python SHA256 leaves headroom; 3x keeps more cores busy
+    mult = int(os.getenv("AURORA_CPU_OVERSUBSCRIBE", "3") or 3)
+    mult = max(1, min(mult, 8))
+    return max(1, cpus * mult)
 
 
 class BfgminerBackend:
@@ -89,9 +97,6 @@ class BfgminerBackend:
     def get_hashrate_hs(self) -> float:
         return float(self._last_hs)
 
-    def note_hashrate_hs(self, hs: float):
-        self._last_hs = hs
-
 
 class _QueueReader:
     def __init__(self, q: queue.Queue):
@@ -120,7 +125,7 @@ class CpuStratumBackend:
             return True
         from .stratum_cpu import StratumCpuMiner
 
-        threads = self.cfg.cpu_threads if self.cfg.cpu_threads > 0 else (os.cpu_count() or 2)
+        threads = self.cfg.cpu_threads if self.cfg.cpu_threads > 0 else _default_workers()
         user = f"{self.cfg.wallet}.{self.cfg.worker_name}"
         self._miner = StratumCpuMiner(
             pool_url=self.cfg.pool_url,
@@ -132,7 +137,7 @@ class CpuStratumBackend:
             coin=self.cfg.coin or "BTC",
         )
         ok = self._miner.start()
-        logger.info(f"CPU miner start ok={ok} workers={threads}")
+        logger.info(f"CPU miner start ok={ok} workers={threads} (oversubscribe for util)")
         return ok
 
     def stop(self, timeout: float = 10.0):
