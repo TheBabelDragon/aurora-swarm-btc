@@ -28,10 +28,6 @@ class BabelLedger:
         self.ledger = BVLLedger(comms)
         self.policy = policy or BVLPolicy()
 
-    # ------------------------------------------------------------------
-    # Balances
-    # ------------------------------------------------------------------
-
     def balance(self, node_id: Optional[str] = None) -> float:
         return self.ledger.get_balance(node_id or self.node_id)
 
@@ -93,10 +89,6 @@ class BabelLedger:
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Earn
-    # ------------------------------------------------------------------
-
     def reward_seed(self, node_id: Optional[str] = None, asset_id: str = "", amount: Optional[float] = None) -> Dict[str, Any]:
         amt = amount if amount is not None else self.policy.seed_hold
         return self._credit(
@@ -122,7 +114,6 @@ class BabelLedger:
         )
 
     def score_holders(self, asset_id: str) -> List[Dict[str, Any]]:
-        """Mint seed rewards for every node that holds the asset."""
         holders: List[str] = []
         try:
             from mods.asset_fabric.fabric import AssetFabric
@@ -136,12 +127,23 @@ class BabelLedger:
             out.append(self.reward_seed(h, asset_id=asset_id))
         return out
 
-    # ------------------------------------------------------------------
-    # Transfer / settle
-    # ------------------------------------------------------------------
-
     def transfer(self, to_node: str, amount: float, memo: str = "") -> Dict[str, Any]:
         from_node = self.node_id
+        to_node = (to_node or "").strip()
+        if not to_node:
+            return {"ok": False, "error": "to_node required"}
+        if to_node == from_node:
+            return {"ok": False, "error": "cannot transfer to self"}
+        try:
+            amount = float(amount)
+        except Exception:
+            return {"ok": False, "error": "invalid amount"}
+        if amount <= 0:
+            return {"ok": False, "error": "amount must be positive"}
+        max_tx = float(getattr(self.policy, "max_transfer", 1_000_000) or 1_000_000)
+        if amount > max_tx:
+            return {"ok": False, "error": "amount exceeds max_transfer", "max": max_tx}
+        memo = (memo or "")[:200]
         fee = self.policy.transfer_fee
         total = amount + fee
         bal = self.ledger.get_balance(from_node)
@@ -179,11 +181,6 @@ class BabelLedger:
         tip_node: Optional[str] = None,
         asset_id: str = "",
     ) -> Dict[str, Any]:
-        """
-        Burn BVL and attempt an ln_tips reward (sats) to tip_node (default: self).
-
-        Soft dependency: if ln_tips missing, burn still happens and settlement is recorded as pending.
-        """
         node = tip_node or self.node_id
         burned = self._debit(node, amount_bvl, reason="settle_to_sats", meta={"asset_id": asset_id})
         if not burned.get("ok"):
