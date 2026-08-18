@@ -1,13 +1,13 @@
-"""Comms Layer — mesh status, discovery, auto-export, interconnect."""
+"""Comms Layer — mesh status, discovery, export, live chat."""
 
 from __future__ import annotations
 
 import logging
 import os
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from fastapi import Form
+from fastapi import Form, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 logger = logging.getLogger("aurora-dashboard.comms_ops")
@@ -34,6 +34,11 @@ def _fmt(hs: float) -> str:
 
 
 def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
+    def _chat():
+        from comms.chat import MeshChat
+
+        return MeshChat(get_comms())
+
     @app.get("/comms/status")
     def comms_status():
         comms = get_comms()
@@ -79,57 +84,40 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             "redis_url": _redact_redis(getattr(comms, "redis_url", "") or os.getenv("REDIS_URL", "")),
             "node_id": comms.node_id,
             "peer_count": len(peers),
-            "peers": [
-                {
-                    "node_id": p.get("node_id"),
-                    "node_type": p.get("node_type"),
-                    "capabilities": p.get("capabilities") or [],
-                    "ts": p.get("ts"),
-                    "metadata": p.get("metadata") or {},
-                }
-                for p in peers
-            ],
+            "peers": peers,
             "lan_discovered": lan,
             "lan_count": len(lan),
             "global_hashrate_hs": total_hs,
             "global_hashrate_display": _fmt(total_hs),
             "discovery_port": int(os.getenv("AURORA_DISCOVERY_PORT", "7379") or 7379),
             "ts": time.time(),
-            "note": "Use /comms/export for one-shot join pack",
         }
 
     @app.get("/comms/export")
     def comms_export():
-        """Everything a peer needs — JSON."""
         try:
             from comms.mesh_export import export_join_pack
             from comms.discovery import get_discovery
 
             comms = get_comms()
-            peers = comms.get_active_nodes() or []
-            discovered = []
             d = get_discovery()
-            if d:
-                discovered = d.snapshot_peers()
             return export_join_pack(
                 node_id=comms.node_id,
                 redis_url=getattr(comms, "redis_url", "") or os.getenv("REDIS_URL", ""),
-                peers=peers,
-                discovered=discovered,
+                peers=comms.get_active_nodes() or [],
+                discovered=d.snapshot_peers() if d else [],
             )
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.get("/comms/export.env", response_class=PlainTextResponse)
     def comms_export_env():
-        """Downloadable env block for the other machine."""
         try:
             from comms.mesh_export import export_join_pack
 
-            comms = get_comms()
             pack = export_join_pack(
-                node_id=comms.node_id,
-                redis_url=getattr(comms, "redis_url", "") or os.getenv("REDIS_URL", ""),
+                node_id=get_comms().node_id,
+                redis_url=getattr(get_comms(), "redis_url", "") or os.getenv("REDIS_URL", ""),
             )
             return PlainTextResponse(pack["env_export"], media_type="text/plain")
         except Exception as e:
@@ -140,10 +128,9 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         try:
             from comms.mesh_export import export_join_pack
 
-            comms = get_comms()
             pack = export_join_pack(
-                node_id=comms.node_id,
-                redis_url=getattr(comms, "redis_url", "") or os.getenv("REDIS_URL", ""),
+                node_id=get_comms().node_id,
+                redis_url=getattr(get_comms(), "redis_url", "") or os.getenv("REDIS_URL", ""),
             )
             script = (
                 "#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -163,12 +150,7 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             d = get_discovery()
             if not d:
                 return {"enabled": False, "peers": []}
-            return {
-                "enabled": True,
-                "join_url": d.join_url,
-                "port": d.port,
-                "peers": d.snapshot_peers(),
-            }
+            return {"enabled": True, "join_url": d.join_url, "port": d.port, "peers": d.snapshot_peers()}
         except Exception as e:
             return {"enabled": False, "error": str(e), "peers": []}
 
@@ -178,7 +160,7 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             comms = get_comms()
             comms.register_node(
                 node_type="dashboard",
-                capabilities=["dashboard", "mesh", "mining_engine", "comms"],
+                capabilities=["dashboard", "mesh", "mining_engine", "comms", "chat"],
                 metadata={"status": "online"},
             )
             comms.heartbeat(metadata={"status": "online"})
@@ -198,9 +180,62 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
                 source=comms.node_id,
             )
             comms.publish_message("events", msg)
-            if hasattr(comms, "publish_event"):
-                comms.publish_event("comms_test", {"text": message})
+            # also as swarm chat
+            _chat().send(message, to=None)
             return {"ok": True, "published": True, "message": message}
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    # —— Live chat ——
+    @app.get("/comms/chat/users")
+    def chat_users(q: str = Query("")):
+        try:
+            c = _chat()
+            users = c.search_users(q) if q else c.list_users()
+            return {"ok": True, "me": get_comms().node_id, "users": users, "count": len(users)}
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.get("/comms/chat/history")
+    def chat_history(
+        with_user: Optional[str] = Query(None),
+        room: str = Query("swarm"),
+        limit: int = Query(80),
+    ):
+        try:
+            return {
+                "ok": True,
+                "me": get_comms().node_id,
+                "with_user": with_user,
+                "room": room if not with_user else None,
+                "messages": _chat().history(with_user=with_user, room=room, limit=limit),
+            }
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.post("/comms/chat/send")
+    async def chat_send(
+        text: str = Form(...),
+        to: str = Form(""),
+        room: str = Form("swarm"),
+    ):
+        try:
+            to_n = (to or "").strip() or None
+            out = _chat().send(text, to=to_n, room=room or "swarm")
+            if not out.get("ok"):
+                return JSONResponse(out, status_code=400)
+            return out
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @app.post("/comms/chat/add_user")
+    async def chat_add_user(node_id: str = Form(...), display: str = Form("")):
+        try:
+            nid = (node_id or "").strip()
+            if not nid:
+                return JSONResponse({"ok": False, "error": "node_id required"}, status_code=400)
+            _chat().remember_user(nid, display=display or nid, source="external")
+            return {"ok": True, "node_id": nid}
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
@@ -211,4 +246,4 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return {"items": [], "error": str(e)}
 
-    logger.info("comms_ops mounted (export+discovery)")
+    logger.info("comms_ops mounted (chat+export+discovery)")
