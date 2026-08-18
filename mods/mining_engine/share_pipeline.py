@@ -1,8 +1,5 @@
 """
 Parse miner stdout → hashrate telemetry + progressive mining provenance.
-
-Reports human units (H/s … TH/s). CPU miners often sit in KH/s–MH/s;
-storing only rounded GH/s made the UI show 0.0.
 """
 
 from __future__ import annotations
@@ -14,21 +11,16 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("aurora.mining.shares")
 
-# Include plain H/s for pure-Python CPU backend
 HASH_RE = re.compile(r"(\d+\.?\d*)\s*(H|KH|MH|GH|TH)/s", re.I)
 MULT = {"H": 1.0, "KH": 1e3, "MH": 1e6, "GH": 1e9, "TH": 1e12}
 
 
 def parse_hashrate_hs(line: str) -> Optional[float]:
-    """Return hashrate in hashes/second."""
     m = HASH_RE.search(line)
     if not m:
         return None
     unit = m.group(2).upper()
-    if unit == "H":
-        mult = 1.0
-    else:
-        mult = MULT.get(unit, 1.0)
+    mult = 1.0 if unit == "H" else MULT.get(unit, 1.0)
     return float(m.group(1)) * mult
 
 
@@ -74,7 +66,6 @@ class SharePipeline:
         self.worker_id = worker_id
         self.pool_id = pool_id
         self.facility_domain = facility_domain
-        # callback receives GH/s (may be fractional for CPU)
         self.on_hashrate = on_hashrate
         self.shares_accepted = 0
         self.shares_rejected = 0
@@ -98,25 +89,19 @@ class SharePipeline:
                 except Exception:
                     pass
             try:
-                self.comms.set_state(
-                    f"worker:{self.worker_id}:hashrate",
-                    {
-                        "hashrate_hs": self.last_hashrate_hs,
-                        "hashrate_ghs": self.last_hashrate_ghs,
-                        "hashrate_display": self.last_hashrate_display,
-                        "ts": time.time(),
-                        "status": "mining",
-                    },
-                    expire=120,
-                )
-                self.comms.publish_telemetry(
-                    {
-                        "hashrate_hs": self.last_hashrate_hs,
-                        "hashrate_ghs": self.last_hashrate_ghs,
-                        "hashrate_display": self.last_hashrate_display,
-                        "status": "mining",
-                    }
-                )
+                payload = {
+                    "hashrate_hs": self.last_hashrate_hs,
+                    "hashrate_ghs": self.last_hashrate_ghs,
+                    "hashrate_display": self.last_hashrate_display,
+                    "ts": time.time(),
+                    "status": "mining",
+                }
+                self.comms.set_state(f"worker:{self.worker_id}:hashrate", payload, expire=120)
+                # cluster totals used by legacy /status bus readers
+                self.comms.set_state("cluster:total_hashrate_hs", self.last_hashrate_hs)
+                self.comms.set_state("cluster:total_hashrate_ghs", self.last_hashrate_ghs)
+                self.comms.set_state("cluster:total_hashrate_btc", self.last_hashrate_hs / 1e12)
+                self.comms.publish_telemetry(payload)
             except Exception as e:
                 logger.debug(f"hashrate publish: {e}")
 

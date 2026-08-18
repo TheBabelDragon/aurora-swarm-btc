@@ -1,8 +1,9 @@
-"""Uvicorn target: dashboard.run:app with truthful status + ops mounted."""
+"""Uvicorn target: dashboard.run:app with all ops + live status."""
 from __future__ import annotations
 
 from dashboard.dashboard import (
     app,
+    bus,
     comms,
     get_anchor,
     get_fabric,
@@ -18,9 +19,9 @@ boot(
     get_anchor=get_anchor,
     get_identity=get_identity,
     get_fabric=get_fabric,
+    bus=bus,
 )
 
-# Eager torrent manager so capability exists before first UI poll
 try:
     get_torrent_manager()
 except Exception:
