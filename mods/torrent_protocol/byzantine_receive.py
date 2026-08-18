@@ -2,7 +2,7 @@
 Byzantine verify-on-receive for TorrentManager.
 
 Wraps _on_piece_data so invalid pieces never enter local state.
-Also attaches PieceChallenger, topology publish, and RepairPlanner.
+Also attaches PieceChallenger, topology, RepairPlanner, RepairExecutor.
 """
 
 from __future__ import annotations
@@ -77,7 +77,6 @@ def attach_byzantine_receive(manager: Any) -> bool:
             src = msg.source or "unknown"
 
             if hashlib.sha256(data).hexdigest() != expected_hash:
-                logger.warning(f"Hash mismatch {str(infohash)[:12]} piece {idx}")
                 if getattr(manager, "peer_evidence", None):
                     manager.peer_evidence.record_invalid_piece(src, "payload_hash_mismatch")
                 return
@@ -86,7 +85,6 @@ def attach_byzantine_receive(manager: Any) -> bool:
             if not meta or idx >= len(meta.piece_hashes):
                 return
             if expected_hash != meta.piece_hashes[idx]:
-                logger.warning(f"Manifest slot mismatch {str(infohash)[:12]}[{idx}]")
                 if getattr(manager, "peer_evidence", None):
                     manager.peer_evidence.record_invalid_piece(src, "manifest_slot_mismatch")
                 return
@@ -183,11 +181,9 @@ def attach_byzantine_receive(manager: Any) -> bool:
             peer_evidence=manager.peer_evidence,
             possession=manager.possession,
         )
-        logger.info(f"PieceChallenger attached on {manager.node_id}")
     except Exception as e:
         logger.debug(f"PieceChallenger not attached: {e}")
 
-    # Topology + verified repair planner
     try:
         from mods.asset_fabric.topology import TopologyRegistry, publish_topology, load_topology_from_mesh
         from mods.asset_fabric.repair import RepairPlanner, RedundancyPolicy
@@ -202,6 +198,29 @@ def attach_byzantine_receive(manager: Any) -> bool:
             registry,
             RedundancyPolicy(),
         )
+        try:
+            from mods.asset_fabric.repair_executor import RepairExecutor
+
+            def _candidates():
+                try:
+                    nodes = manager.comms.get_active_nodes() or []
+                    out = []
+                    for n in nodes:
+                        if isinstance(n, dict):
+                            out.append(n.get("node_id") or n.get("id"))
+                        elif isinstance(n, str):
+                            out.append(n)
+                    return [x for x in out if x]
+                except Exception:
+                    return []
+
+            manager.repair_executor = RepairExecutor(
+                manager.comms,
+                manager.repair_planner,
+                list_candidates=_candidates,
+            )
+        except Exception as e:
+            logger.debug(f"RepairExecutor not attached: {e}")
         logger.info(
             f"Topology published site={topo.site} power={topo.power} "
             f"net={topo.network} rack={topo.rack}"
