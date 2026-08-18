@@ -1,12 +1,4 @@
-"""
-Single place to attach optional ops routers.
-
-Usage in dashboard.py:
-
-    from mount_all import mount_optional_ops
-    mount_optional_ops(app, get_comms=lambda: comms, get_torrent_manager=get_torrent_manager,
-                       get_anchor=get_anchor, get_identity=get_identity)
-"""
+"""Attach optional ops routers (package-safe imports)."""
 
 from __future__ import annotations
 
@@ -14,6 +6,16 @@ import logging
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("aurora-dashboard.mount")
+
+
+def _import_mount(name: str):
+    """Prefer package import; fall back to bare (PYTHONPATH=/app/dashboard)."""
+    try:
+        mod = __import__(f"dashboard.{name}", fromlist=["*"])
+        return mod
+    except Exception:
+        mod = __import__(name)
+        return mod
 
 
 def mount_optional_ops(
@@ -24,32 +26,35 @@ def mount_optional_ops(
     get_anchor: Optional[Callable[[], Any]] = None,
     get_identity: Optional[Callable[[], Any]] = None,
 ):
-    try:
-        from fabric_ops import mount_fabric_ops
-
-        mount_fabric_ops(app, get_comms=get_comms, get_torrent_manager=get_torrent_manager)
-    except Exception as e:
-        logger.debug(f"fabric_ops: {e}")
+    mounted = []
 
     try:
-        from mining_ops import mount_mining_ops
-
-        mount_mining_ops(app, get_comms=get_comms)
+        m = _import_mount("fabric_ops")
+        m.mount_fabric_ops(app, get_comms=get_comms, get_torrent_manager=get_torrent_manager)
+        mounted.append("fabric")
     except Exception as e:
-        logger.debug(f"mining_ops: {e}")
+        logger.warning(f"fabric_ops: {e}")
 
     try:
-        from bvl_ops import mount_bvl_ops
-
-        mount_bvl_ops(app, get_comms=get_comms)
+        m = _import_mount("mining_ops")
+        m.mount_mining_ops(app, get_comms=get_comms)
+        mounted.append("mining")
     except Exception as e:
-        logger.debug(f"bvl_ops: {e}")
+        logger.warning(f"mining_ops: {e}")
 
     try:
-        from btc_ops import mount_btc_ops
-
-        mount_btc_ops(app, get_anchor=get_anchor, get_identity=get_identity)
+        m = _import_mount("bvl_ops")
+        m.mount_bvl_ops(app, get_comms=get_comms)
+        mounted.append("bvl")
     except Exception as e:
-        logger.debug(f"btc_ops: {e}")
+        logger.warning(f"bvl_ops: {e}")
 
-    logger.info("optional ops mount pass complete")
+    try:
+        m = _import_mount("btc_ops")
+        m.mount_btc_ops(app, get_anchor=get_anchor, get_identity=get_identity)
+        mounted.append("btc")
+    except Exception as e:
+        logger.warning(f"btc_ops: {e}")
+
+    logger.info(f"optional ops mounted: {mounted or 'NONE'}")
+    return mounted
