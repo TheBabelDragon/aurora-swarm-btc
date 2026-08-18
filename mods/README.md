@@ -10,6 +10,7 @@ This directory contains all experimental and pluggable behavior for the swarm.
 - `gpu_utilization_balancer` — Avoids highly utilized GPUs
 - `torrent_protocol` — In-mesh piece distribution (current Asset Fabric transport)
 - `asset_fabric` — Content-addressed swarm Asset Fabric (`ensure` is the public verb)
+- `btc_anchor` — Optional Bitcoin-style attestation for asset manifests
 
 ## Mod Structure
 
@@ -40,7 +41,8 @@ mods/
 
 See `scheduler/hook_registry.py` and `scheduler/node_selector.py` for how hooks are used.
 
-### Asset direction
+### Asset & attestation direction
 
-Prefer the `asset_fabric` language (`ensure`, `publish`, `possession`) for new code.  
-`torrent_protocol` remains the piece-transport implementation underneath it.
+Prefer the `asset_fabric` language (`ensure`, `publish`, `possession`) for data-plane work.  
+Use `btc_anchor` when a selected asset should gain an optional public commitment.  
+`torrent_protocol` remains the piece-transport implementation underneath the fabric.
