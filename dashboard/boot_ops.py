@@ -20,6 +20,14 @@ def boot(
     if getattr(app.state, "aurora_booted", False):
         return
 
+    # Apply mining guards before any auto-mine
+    try:
+        from mods.mining_engine.stratum_guard import apply_stratum_guards
+
+        apply_stratum_guards()
+    except Exception as e:
+        logger.warning(f"stratum_guard: {e}")
+
     try:
         from dashboard.html_fix import install_html_fix
 
@@ -130,6 +138,13 @@ def boot(
         start_mesh_heartbeat(get_comms)
     except Exception as e:
         logger.warning(f"mesh_heartbeat: {e}")
+
+    try:
+        from dashboard.stability import start_stability_loop
+
+        start_stability_loop(get_comms)
+    except Exception as e:
+        logger.warning(f"stability: {e}")
 
     # Auto identity on process start (no button / no curl)
     try:
