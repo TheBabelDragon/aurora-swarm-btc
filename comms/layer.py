@@ -40,11 +40,30 @@ class CommsLayer:
     def __init__(self, redis_url: Optional[str] = None, node_id: Optional[str] = None):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
         self.node_id = node_id or os.getenv("AURORA_NODE_ID", "unknown-node")
-        self.r = redis.from_url(self.redis_url, decode_responses=True)
-        self.pubsub = self.r.pubsub()
+        # Timeouts so a missing Redis does not hang the process forever
+        self.r = redis.from_url(
+            self.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2.0,
+            socket_timeout=5.0,
+            retry_on_timeout=True,
+            health_check_interval=30,
+        )
+        try:
+            self.pubsub = self.r.pubsub()
+        except Exception as e:
+            logger.warning(f"pubsub init deferred: {e}")
+            self.pubsub = None
         self.handlers: Dict[str, List[Callable[[SwarmMessage], None]]] = {}
         self._subscribed_patterns: List[str] = []
-        logger.info(f"CommsLayer initialized for node={self.node_id}")
+        logger.info(f"CommsLayer initialized for node={self.node_id} url={self.redis_url}")
+
+    def ping(self) -> bool:
+        try:
+            return bool(self.r.ping())
+        except Exception as e:
+            logger.debug(f"redis ping failed: {e}")
+            return False
 
     # --- Core primitives ---
 
@@ -79,196 +98,97 @@ class CommsLayer:
 
     def _log_event_to_history(self, msg: SwarmMessage):
         try:
-            event_data = msg.model_dump()
-            self.r.lpush(f"aurora:{self.EVENT_HISTORY_KEY}", json.dumps(event_data))
-            self.r.ltrim(f"aurora:{self.EVENT_HISTORY_KEY}", 0, self.MAX_EVENTS - 1)
+            entry = msg.model_dump_json() if hasattr(msg, "model_dump_json") else json.dumps(msg.dict())
+            pipe = self.r.pipeline()
+            pipe.lpush(f"aurora:{self.EVENT_HISTORY_KEY}", entry)
+            pipe.ltrim(f"aurora:{self.EVENT_HISTORY_KEY}", 0, self.MAX_EVENTS - 1)
+            pipe.execute()
         except Exception as e:
-            logger.warning(f"Failed to log event to history: {e}")
+            logger.debug(f"event history: {e}")
 
-    def get_recent_events(self, limit: int = 20) -> List[Dict]:
+    def get_recent_events(self, limit: int = 20) -> List[Dict[str, Any]]:
         try:
-            raw_events = self.r.lrange(f"aurora:{self.EVENT_HISTORY_KEY}", 0, limit - 1) or []
-            return [json.loads(e) for e in raw_events]
-        except Exception:
+            raw = self.r.lrange(f"aurora:{self.EVENT_HISTORY_KEY}", 0, max(0, limit - 1))
+            out = []
+            for item in raw or []:
+                try:
+                    out.append(json.loads(item))
+                except Exception:
+                    out.append({"raw": item})
+            return out
+        except Exception as e:
+            logger.debug(f"get_recent_events: {e}")
             return []
-
-    # --- Mesh / Node Registration with Capabilities ---
-
-    def register_node(
-        self,
-        node_id: Optional[str] = None,
-        node_type: str = "worker",
-        capabilities: Optional[List[str]] = None,
-        metadata: Optional[Dict] = None,
-        ttl: int = 90
-    ):
-        """
-        Register this node in the mesh with type and capabilities.
-
-        node_type should be one of: worker, coordinator, sensing, interface, gateway
-        capabilities: list of things this node can do (e.g. ["gpu_mining", "intensity_control"])
-        """
-        if node_type not in self.CORE_NODE_TYPES:
-            logger.warning(f"Unknown node_type '{node_type}'. Consider using one of {self.CORE_NODE_TYPES}")
-
-        nid = node_id or self.node_id
-        caps: Set[str] = set(capabilities or [])
-
-        data = {
-            "node_id": nid,
-            "type": node_type,
-            "capabilities": list(caps),
-            "last_seen": time.time(),
-            "metadata": metadata or {}
-        }
-
-        self.set_state(f"nodes:{nid}", data, expire=ttl)
-        self.r.sadd(f"aurora:nodes:{node_type}", nid)
-        self.r.expire(f"aurora:nodes:{node_type}", ttl * 2)
-
-        # Also index by capability for fast lookup
-        for cap in caps:
-            self.r.sadd(f"aurora:capability:{cap}", nid)
-
-        logger.info(f"[MESH] Registered {nid} (type={node_type}, capabilities={caps})")
-
-    def heartbeat(self, node_id: Optional[str] = None, metadata: Optional[Dict] = None):
-        nid = node_id or self.node_id
-        existing = self.get_state(f"nodes:{nid}")
-        if existing:
-            existing["last_seen"] = time.time()
-            if metadata:
-                existing["metadata"].update(metadata)
-            self.set_state(f"nodes:{nid}", existing, expire=90)
-
-    def get_active_nodes(self, node_type: Optional[str] = None) -> List[Dict]:
-        if node_type:
-            node_ids = self.r.smembers(f"aurora:nodes:{node_type}") or []
-        else:
-            keys = self.r.keys("aurora:nodes:*")
-            node_ids = [k.split(":")[-1] for k in keys if ":nodes:" in k]
-
-        nodes = []
-        for nid in node_ids:
-            data = self.get_state(f"nodes:{nid}")
-            if data:
-                nodes.append(data)
-        return nodes
-
-    def get_nodes_by_capability(self, capability: str) -> List[Dict]:
-        """Get all active nodes that have a specific capability."""
-        node_ids = self.r.smembers(f"aurora:capability:{capability}") or []
-        nodes = []
-        for nid in node_ids:
-            data = self.get_state(f"nodes:{nid}")
-            if data:
-                nodes.append(data)
-        return nodes
-
-    def get_workers(self) -> List[Dict]:
-        return self.get_active_nodes(node_type="worker")
-
-    # --- Messaging ---
-
-    def send_to_node(self, target_node_id: str, message: Any):
-        if isinstance(message, BaseModel):
-            message = message.model_dump_json()
-        elif isinstance(message, (dict, list)):
-            message = json.dumps(message)
-        channel = f"node:{target_node_id}"
-        self.publish(channel, message)
-
-    def broadcast_to_workers(self, message: Any):
-        workers = self.get_workers()
-        for w in workers:
-            nid = w.get("node_id")
-            if nid and nid != self.node_id:
-                self.send_to_node(nid, message)
-
-    def broadcast_to_capability(self, capability: str, message: Any):
-        """Send a message to all nodes that have a specific capability."""
-        nodes = self.get_nodes_by_capability(capability)
-        for node in nodes:
-            nid = node.get("node_id")
-            if nid and nid != self.node_id:
-                self.send_to_node(nid, message)
-
-    # --- High-level methods ---
-
-    def publish_event(self, event_type: str, data: Dict[str, Any], source: Optional[str] = None):
-        msg = SwarmMessage(type=f"event.{event_type}", payload=data, source=source or self.node_id)
-        self.publish_message("events", msg)
-        self.publish("events", {"type": event_type, "data": data, "source": source or self.node_id})
-
-    def publish_telemetry(self, metrics: Dict[str, Any], source: Optional[str] = None):
-        msg = SwarmMessage(type="telemetry", payload=metrics, source=source or self.node_id)
-        self.publish_message("telemetry", msg)
-
-    def send_command(self, action: str, payload: Dict[str, Any] = None, target: Optional[str] = None):
-        cmd = SwarmMessage(type="command", payload={"action": action, **(payload or {})}, source=self.node_id, target=target)
-        if target:
-            self.publish_message(f"commands:{target}", cmd)
-        else:
-            self.publish_message("commands", cmd)
-            self.publish("swarm:commands", {"action": action, **(payload or {})})
-
-    def send_sensing_command(self, action: str, **kwargs):
-        self.send_command(action, payload=kwargs, target="sensing")
-
-    # --- Subscription handling ---
 
     def subscribe(self, pattern: str, handler: Callable[[SwarmMessage], None]):
         if pattern not in self.handlers:
             self.handlers[pattern] = []
         self.handlers[pattern].append(handler)
+        if pattern not in self._subscribed_patterns:
+            self._subscribed_patterns.append(pattern)
+            try:
+                if self.pubsub is None:
+                    self.pubsub = self.r.pubsub()
+                self.pubsub.psubscribe(f"aurora:{pattern}")
+            except Exception as e:
+                logger.warning(f"subscribe failed: {e}")
 
-    def start_listener(self, patterns: Optional[List[str]] = None):
-        patterns = patterns or list(self.handlers.keys()) or ["aurora:events", "aurora:commands", "aurora:sensing:*", f"aurora:node:{self.node_id}"]
-        for p in patterns:
-            if p not in self._subscribed_patterns:
-                self.pubsub.psubscribe(p)
-                self._subscribed_patterns.append(p)
-
-        logger.info(f"[MESH] Listener started on: {self._subscribed_patterns}")
-
-        for message in self.pubsub.listen():
-            if message["type"] in ("pmessage", "message"):
-                try:
-                    raw = message.get("data", "")
-                    data = json.loads(raw) if isinstance(raw, str) else raw
-
-                    if isinstance(data, dict) and "type" in data:
-                        try:
-                            msg = SwarmMessage(**data)
-                        except:
-                            msg = SwarmMessage(type="raw", payload={"raw": data})
-                    else:
-                        msg = SwarmMessage(type="raw", payload={"raw": data})
-
-                    for pat, handlers in self.handlers.items():
-                        if (pat.endswith("*") and msg.type.startswith(pat[:-1])) or pat == msg.type or pat in str(message.get("channel", "")):
-                            for h in handlers:
-                                try:
-                                    h(msg)
-                                except Exception as e:
-                                    logger.error(f"Handler error: {e}")
-                except Exception as e:
-                    logger.error(f"Listener error: {e}")
-
-    def close(self):
+    def register_node(
+        self,
+        node_type: str = "worker",
+        capabilities: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        meta = metadata or {}
+        payload = {
+            "node_id": self.node_id,
+            "node_type": node_type,
+            "capabilities": capabilities or [],
+            "metadata": meta,
+            "ts": time.time(),
+        }
         try:
-            self.pubsub.close()
-        except:
-            pass
+            self.set_state(f"node:{self.node_id}", payload, expire=120)
+            self.r.sadd("aurora:nodes:active", self.node_id)
+        except Exception as e:
+            logger.warning(f"register_node failed: {e}")
 
+    def heartbeat(self, metadata: Optional[Dict[str, Any]] = None):
+        try:
+            raw = self.get_state(f"node:{self.node_id}") or {}
+            if metadata:
+                raw.setdefault("metadata", {}).update(metadata)
+            raw["ts"] = time.time()
+            self.set_state(f"node:{self.node_id}", raw, expire=120)
+            self.r.sadd("aurora:nodes:active", self.node_id)
+        except Exception as e:
+            logger.debug(f"heartbeat: {e}")
 
-if __name__ == "__main__":
-    layer = CommsLayer(node_id="test-node")
-    layer.register_node(
-        node_type="worker",
-        capabilities=["gpu_mining", "intensity_control", "pause_resume"],
-        metadata={"gpus": 1}
-    )
-    print("Registered with capabilities.")
-    print("Workers:", [n["node_id"] for n in layer.get_workers()])
-    print("Nodes with intensity_control:", [n["node_id"] for n in layer.get_nodes_by_capability("intensity_control")])
+    def get_active_nodes(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        try:
+            ids = list(self.r.smembers("aurora:nodes:active") or [])
+            for nid in ids:
+                raw = self.get_state(f"node:{nid}")
+                if isinstance(raw, dict):
+                    out.append(raw)
+                else:
+                    out.append({"node_id": nid})
+        except Exception as e:
+            logger.debug(f"get_active_nodes: {e}")
+        return out
+
+    def get_workers(self) -> List[Dict[str, Any]]:
+        nodes = self.get_active_nodes()
+        return [n for n in nodes if n.get("node_type") == "worker" or "worker" in (n.get("capabilities") or [])]
+
+    def get_nodes_by_capability(self, cap: str) -> List[Dict[str, Any]]:
+        return [n for n in self.get_active_nodes() if cap in (n.get("capabilities") or [])]
+
+    def broadcast_to_workers(self, payload: Dict[str, Any]):
+        msg = SwarmMessage(type="command", payload=payload, source=self.node_id)
+        self.publish_message("command.workers", msg)
+
+    def send_to_node(self, node_id: str, payload: Dict[str, Any]):
+        msg = SwarmMessage(type="command", payload=payload, source=self.node_id, target=node_id)
+        self.publish_message(f"command.node.{node_id}", msg)
