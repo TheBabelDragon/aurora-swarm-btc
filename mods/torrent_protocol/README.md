@@ -2,6 +2,10 @@
 
 **Swarm-native piece distribution** inspired by BitTorrent.
 
+> **Prefer the higher-level API.**  
+> New code should speak through `mods.asset_fabric` (`ensure`, `publish`, `possession`).  
+> This module is the current **transport implementation** of the Asset Fabric.
+
 Zero external BitTorrent dependencies. Everything rides on the existing CommsLayer mesh.
 
 ## Why this is the strongest version
@@ -13,38 +17,35 @@ Zero external BitTorrent dependencies. Everything rides on the existing CommsLay
 | Input validation + size limits | ✅ |
 | Rarest-first + back-pressure | ✅ |
 | Exponential piece backoff | ✅ |
-| **Persistent wanted set** | ✅ new |
-| **Background maintainer** | ✅ new |
-| **Automatic meta re-fetch** | ✅ new |
-| **Stall detection + recovery** | ✅ new |
+| Persistent wanted set | ✅ |
+| Background maintainer | ✅ |
+| Automatic meta re-fetch | ✅ |
+| Stall detection + recovery | ✅ |
 | Scheduler `on_asset_needed` | ✅ |
 
-Once you ask for an asset (via `ensure_asset`, `start_download`, or the scheduler hook) the manager will keep trying until it succeeds or you explicitly stop it.
+## Recommended usage (transport level)
 
-## Recommended usage
+For most callers, use Asset Fabric instead:
 
 ```python
-from comms.layer import CommsLayer
+from mods.asset_fabric.fabric import AssetFabric
+fabric = AssetFabric(comms)
+asset_id = fabric.publish("/path/to/model.pt", asset_type="model")
+fabric.ensure(asset_id)
+```
+
+Direct transport usage (still supported):
+
+```python
 from mods.torrent_protocol.torrent_manager import TorrentManager, register_torrent_capability
 
 comms = CommsLayer(node_id="worker-42")
 register_torrent_capability(comms)
+tm = TorrentManager(comms)
 
-tm = TorrentManager(comms)          # auto-starts background maintainer
-
-# Fire-and-forget — it will keep trying
 infohash = tm.ensure_asset(infohash="abc123...")
-
-# Or create + announce
+# or create from local file
 infohash = tm.ensure_asset("/path/to/big_model.pt")
-
-# Later…
-print(tm.get_progress(infohash))
-print(tm.is_complete(infohash))
-print(tm.get_path(infohash))
-
-# Clean shutdown (optional)
-tm.stop()
 ```
 
 ### From the scheduler
@@ -52,8 +53,6 @@ tm.stop()
 ```python
 registry.run("on_asset_needed", {"infohash": "abc123...", "name": "big_model.pt"})
 ```
-
-The manager adds it to the wanted set and will retry automatically even if metadata is not yet available.
 
 ## Background behaviour
 
@@ -63,8 +62,6 @@ Every ~8 seconds the maintainer:
 2. Detects stalls (no new pieces for 90 s) and forces a recovery
 3. Keeps request pipelines full
 
-You can disable the background thread with `TorrentManager(..., auto_maintain=False)` and call a public tick yourself if you prefer full control.
-
 ## Status
 
-v0.4.0 — the most robust version yet. Still lives in `mods/` so it can be disabled instantly.
+v0.4.0 — transport implementation under Asset Fabric. Still experimental (mods/).
