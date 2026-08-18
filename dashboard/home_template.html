@@ -44,12 +44,15 @@ a{color:#0f0}
 </div>
 </div>
 
-<div class="card"><h2>System</h2>
-<button type="button" onclick="runSelftest()">Self-test</button>
-<button type="button" onclick="registerIdentity()">Register identity</button>
+<div class="card"><h2>Mining</h2>
 <button type="button" onclick="startLocalMine()">Start mining</button>
 <button type="button" onclick="stopLocalMine()">Stop mining</button>
-<div id="selftest_box" class="muted" style="margin-top:10px"></div>
+<button type="button" onclick="registerIdentity()">Register identity</button>
+<details style="margin-top:8px"><summary class="muted">Advanced</summary>
+<button type="button" class="small" onclick="runSelftest()">Self-test (quiet)</button>
+<div id="selftest_box" class="muted" style="margin-top:6px"></div>
+</details>
+<div id="torrent_msg" style="margin-top:8px"></div>
 </div>
 
 <div class="card"><h2>Status</h2>
@@ -72,7 +75,6 @@ a{color:#0f0}
 <div class="card"><h2>Assets</h2>
 <input type="file" id="torrent_file">
 <button type="button" onclick="uploadTorrent()">Upload</button>
-<div id="torrent_msg"></div>
 </div>
 
 <div class="card"><h2>Nodes</h2><pre id="nodes"></pre></div>
