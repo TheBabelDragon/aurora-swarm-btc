@@ -34,10 +34,6 @@ class MiningProvenance:
         self.comms = comms
         self.node_id = comms.node_id
 
-    # ------------------------------------------------------------------
-    # Workers
-    # ------------------------------------------------------------------
-
     def register_worker(self, identity: WorkerIdentity) -> WorkerIdentity:
         identity.updated_at = time.time()
         self.comms.set_state(f"{WORKER_PREFIX}{identity.worker_id}", identity.to_dict(), expire=0)
@@ -66,15 +62,10 @@ class MiningProvenance:
             logger.debug(f"list_workers: {e}")
         return out
 
-    # ------------------------------------------------------------------
-    # Events (progressive evidence)
-    # ------------------------------------------------------------------
-
     def record_event(self, event: MiningEvent) -> MiningEvent:
         if not event.event_id:
             event.event_id = uuid.uuid4().hex[:16]
         self.comms.set_state(f"{EVENT_PREFIX}{event.event_id}", event.to_dict(), expire=86400 * 30)
-        # Index by epoch and worker
         try:
             idx = self.comms.get_state(EVENT_INDEX) or {"by_epoch": {}, "by_worker": {}, "by_txid": {}}
             if not isinstance(idx, dict):
@@ -143,7 +134,7 @@ class MiningProvenance:
             return None
         ev = MiningEvent.from_dict(raw)
         if int(level) < ev.evidence:
-            return ev  # never downgrade
+            return ev
         ev.evidence = int(level)
         if int(level) >= int(EvidenceLevel.POOL_ACCEPTED):
             ev.accepted = True
@@ -155,7 +146,14 @@ class MiningProvenance:
             ev.pool_account = pool_account
         if notes:
             ev.notes = notes
-        return self.record_event(ev)
+        self.record_event(ev)
+        try:
+            from .bvl_hook import maybe_credit_bvl
+
+            maybe_credit_bvl(self.comms, ev)
+        except Exception:
+            pass
+        return ev
 
     def events_for_epoch(self, epoch: int, limit: int = 100) -> List[MiningEvent]:
         return self._events_from_index("by_epoch", str(epoch), limit)
@@ -179,10 +177,6 @@ class MiningProvenance:
             logger.debug(f"_events_from_index: {e}")
         return out
 
-    # ------------------------------------------------------------------
-    # On-chain UTXO (Bitcoin facts) vs custody (Aurora observation)
-    # ------------------------------------------------------------------
-
     def record_utxo(self, utxo: OnChainUTXO) -> OnChainUTXO:
         self.comms.set_state(f"{UTXO_PREFIX}{utxo.key()}", utxo.to_dict(), expire=0)
         return utxo
@@ -200,10 +194,6 @@ class MiningProvenance:
     def get_custody(self, utxo_key: str) -> Optional[Dict[str, Any]]:
         raw = self.comms.get_state(f"{CUSTODY_PREFIX}{utxo_key}")
         return raw if isinstance(raw, dict) else None
-
-    # ------------------------------------------------------------------
-    # Provenance graph queries
-    # ------------------------------------------------------------------
 
     def provenance_for_txid(self, txid: str) -> Dict[str, Any]:
         events = self.events_for_txid(txid)
@@ -257,7 +247,6 @@ class MiningProvenance:
         }
 
     def epoch_snapshot(self, epoch: int) -> Dict[str, Any]:
-        """Compact contribution for epoch state root."""
         who = self.who_epoch(epoch)
         return {
             "epoch": epoch,
