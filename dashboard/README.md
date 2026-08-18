@@ -1,25 +1,29 @@
-# Aurora Dashboard — Comms Operations Center
+# Aurora Dashboard
 
-```bash
-cd dashboard && python dashboard.py
-# http://localhost:8000
+Operations center for assets, attestation, BVL, and mining provenance.
+
+## Mount optional ops
+
+At the bottom of `dashboard.py` (or on startup):
+
+```python
+from mount_all import mount_optional_ops
+mount_optional_ops(
+    app,
+    get_comms=lambda: comms,
+    get_torrent_manager=get_torrent_manager,
+    get_anchor=get_anchor,
+    get_identity=get_identity,
+)
 ```
 
-## Bitcoin-facing extras (`btc_ops.py`)
+This attaches:
 
-Mounted when the dashboard starts:
+- `fabric_ops` — who / repair / epoch / reconstruct  
+- `mining_ops` — who / worker / provenance / observe  
+- `bvl_ops` — ledger  
+- `btc_ops` — anchor / identity  
 
-| Endpoint | Purpose |
-|----------|--------|
-| `GET /btc/status` | network, broadcaster mode, pending queue, mining wallet, identity |
-| `POST /torrent/process_broadcasts_batched` | Merkle-batch drain of anchor queue |
-| `POST /btc/identity/register` | Publish btc_identity claim on the mesh |
+## Architecture
 
-Env for real/dry CLI writes:
-
-```bash
-export AURORA_BTC_BROADCASTER=cli   # or log
-export AURORA_BTC_NETWORK=signet
-export AURORA_BTC_CLI_SEND=0        # 1 to actually send via bitcoin-cli
-export AURORA_BITCOIN_CLI=bitcoin-cli
-```
+See `docs/ARCHITECTURE.md` and `docs/PROBLEMS_SOLVED.md`.
