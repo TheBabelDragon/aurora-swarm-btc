@@ -1,4 +1,4 @@
-"""Mount ops + truthful status routes when dashboard loads."""
+"""Mount ops + truthful status + native fleet/transfer when dashboard loads."""
 from __future__ import annotations
 
 import logging
@@ -57,5 +57,12 @@ def boot(
         )
     except Exception as e:
         logger.warning(f"truth_routes: {e}")
+
+    try:
+        from dashboard.ops_native import install_ops_native
+
+        install_ops_native(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"ops_native: {e}")
 
     app.state.aurora_booted = True
