@@ -1,0 +1,42 @@
+# Solo / laptop: Redis + Dashboard only (no scheduler)
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aurora-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - aurora-net
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: aurora-dashboard
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+      - AURORA_NODE_ID=dashboard
+    restart: unless-stopped
+    networks:
+      - aurora-net
+
+networks:
+  aurora-net:
+    driver: bridge
+
+volumes:
+  redis_data:

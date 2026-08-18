@@ -1,13 +1,12 @@
-"""Container entry: import app, force-mount ops, fallback identity/BVL routes."""
+"""Container entry: serve app; mount ops; never die on optional imports."""
 from __future__ import annotations
 
 import logging
 
-from fastapi import Form
-from fastapi.responses import JSONResponse
-
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aurora-dashboard.ship")
 
+# Import app (may log Redis warnings; must not exit)
 from dashboard.dashboard import (  # noqa: E402
     app,
     comms,
@@ -17,7 +16,10 @@ from dashboard.dashboard import (  # noqa: E402
     get_torrent_manager,
 )
 
-# Primary: mount all ops modules
+from fastapi import Form  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+mounted: list = []
 try:
     from dashboard.mount_all import mount_optional_ops
 
@@ -27,22 +29,20 @@ try:
         get_torrent_manager=get_torrent_manager,
         get_anchor=get_anchor,
         get_identity=get_identity,
-    )
+    ) or []
     logger.info(f"ship mounted: {mounted}")
 except Exception as e:
-    logger.exception(f"ship mount_optional_ops failed: {e}")
-    mounted = []
+    logger.exception(f"mount_optional_ops failed (continuing with fallbacks): {e}")
 
 
-def _route_exists(path: str, method: str = "POST") -> bool:
+def _has(path: str, method: str = "POST") -> bool:
     for r in app.routes:
-        if getattr(r, "path", None) == path and method in (getattr(r, "methods", None) or set()):
+        if getattr(r, "path", None) == path and method in (getattr(r, "methods", set()) or set()):
             return True
     return False
 
 
-# Fallback routes if mount_all did not attach them (fixes Not Found on UI buttons)
-if not _route_exists("/btc/identity/register", "POST"):
+if not _has("/btc/identity/register", "POST"):
 
     @app.post("/btc/identity/register")
     async def _ship_identity_register():
@@ -56,11 +56,12 @@ if not _route_exists("/btc/identity/register", "POST"):
             ident.register_with_identity(capabilities=["dashboard", "btc_identity"])
             return {"status": "ok", "identity": ident.identity_view()}
         except Exception as e:
+            logger.exception("identity register")
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
-    logger.info("ship fallback: /btc/identity/register")
+    logger.info("fallback route /btc/identity/register")
 
-if not _route_exists("/btc/status", "GET"):
+if not _has("/btc/status", "GET"):
 
     @app.get("/btc/status")
     def _ship_btc_status():
@@ -79,9 +80,7 @@ if not _route_exists("/btc/status", "GET"):
             "anchor_ready": get_anchor() is not None,
         }
 
-    logger.info("ship fallback: /btc/status")
-
-if not _route_exists("/bvl/reward_seed", "POST"):
+if not _has("/bvl/reward_seed", "POST"):
 
     @app.post("/bvl/reward_seed")
     async def _ship_bvl_reward_seed(
@@ -95,11 +94,10 @@ if not _route_exists("/bvl/reward_seed", "POST"):
             nid = (node_id or "").strip() or comms.node_id
             return bvl.reward_seed(nid, asset_id=(asset_id or "").strip() or "genesis")
         except Exception as e:
+            logger.exception("bvl reward_seed")
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
-    logger.info("ship fallback: /bvl/reward_seed")
-
-if not _route_exists("/bvl/status", "GET"):
+if not _has("/bvl/status", "GET"):
 
     @app.get("/bvl/status")
     def _ship_bvl_status():
@@ -110,14 +108,26 @@ if not _route_exists("/bvl/status", "GET"):
         except Exception as e:
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
-    logger.info("ship fallback: /bvl/status")
 
+# Always-on health (even if redis is unhappy)
+@app.get("/healthz")
+def _ship_healthz():
+    redis_ok = False
+    try:
+        redis_ok = bool(comms.r.ping())
+    except Exception:
+        pass
+    return {
+        "status": "healthy" if redis_ok else "degraded",
+        "redis": redis_ok,
+        "mounted": mounted,
+        "node_id": comms.node_id,
+    }
+
+
+logger.info("ship ready — uvicorn will serve dashboard.ship:app")
 
 if __name__ == "__main__":
     import uvicorn
 
-    get_torrent_manager()
-    get_anchor()
-    get_fabric()
-    get_identity()
     uvicorn.run(app, host="0.0.0.0", port=8000)
