@@ -1,18 +1,22 @@
-import os
-import time
+"""
+Aurora miner worker — mesh node driving MiningEngine + bfgminer.
+
+GPU hashing: bfgminer OpenCL
+Swarm brain: mods.mining_engine (shares → provenance, adaptive intensity, fleet)
+"""
+
+from __future__ import annotations
+
 import logging
-import subprocess
-import re
+import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
-_APP = Path(__file__).resolve().parent
-if str(_APP) not in sys.path:
-    sys.path.insert(0, str(_APP))
 
 import prometheus_client as prom
 from comms.layer import CommsLayer
@@ -27,122 +31,62 @@ SHARES_ACCEPTED = prom.Counter("aurora_shares_accepted_total", "Accepted shares"
 WORKER_STATUS = prom.Gauge("aurora_worker_status", "Worker status")
 HEALTH = prom.Gauge("aurora_worker_health", "Health status")
 
-GPUS_PER_POD = int(os.getenv("GPUS_PER_POD", "1"))
-WALLET = os.getenv("MINING_WALLET", "bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g")
-POOL_URL = os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333")
-WORKER_NAME = os.getenv("WORKER_NAME", "aurora-gpu1")
-INTENSITY = os.getenv("INTENSITY", "19")
-
-miner_process = None
-healthy = True
-paused = False
-current_intensity = INTENSITY
+engine = None
 
 
-def parse_hashrate(line: str) -> float:
-    match = re.search(r"(\d+\.?\d*)\s*(KH|MH|GH|TH)/s", line, re.IGNORECASE)
-    if match:
-        rate = float(match.group(1))
-        unit = match.group(2).upper()
-        multipliers = {"KH": 1e3, "MH": 1e6, "GH": 1e9, "TH": 1e12}
-        return rate * multipliers.get(unit, 1.0)
-    return 0.0
+def _build_engine():
+    from mods.mining_engine.engine import MiningEngine
 
+    eng = MiningEngine(
+        comms,
+        worker_id=os.getenv("WORKER_NAME", comms.node_id),
+        pool_url=os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333"),
+        wallet=os.getenv("MINING_WALLET", ""),
+        intensity=os.getenv("INTENSITY", "19"),
+        gpus=int(os.getenv("GPUS_PER_POD", "1")),
+        facility_domain=os.getenv("FACILITY_DOMAIN", "unknown"),
+        binary=os.getenv("BFGMINER_BIN", "bfgminer"),
+    )
 
-def start_miner(intensity: str = None):
-    global miner_process, healthy, current_intensity, paused
-    use_intensity = intensity or current_intensity
-    current_intensity = use_intensity
+    def on_hr(gh: float):
+        HASH_RATE.set(gh)
 
-    cmd = [
-        "bfgminer",
-        "-o", POOL_URL,
-        "-u", f"{WALLET}.{WORKER_NAME}",
-        "-p", "x",
-        "--no-getwork",
-        "-S", "opencl:auto",
-        "--intensity", str(use_intensity),
-        "--api-listen",
-        "--quiet",
-    ]
-    if GPUS_PER_POD > 1:
-        cmd.extend(["--set", f"gpu_count={GPUS_PER_POD}"])
-
-    logger.info(f"Starting bfgminer with intensity={use_intensity} ({GPUS_PER_POD} GPU(s))...")
-    try:
-        miner_process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-        )
-        WORKER_STATUS.set(1)
-        HEALTH.set(1)
-        healthy = True
-        paused = False
-        return miner_process
-    except Exception as e:
-        logger.error(f"Failed to start miner: {e}")
-        HEALTH.set(0)
-        healthy = False
-        return None
-
-
-def stop_miner():
-    global miner_process, healthy, paused
-    if miner_process and miner_process.poll() is None:
-        logger.info("Stopping miner...")
-        miner_process.terminate()
-        try:
-            miner_process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            miner_process.kill()
-        WORKER_STATUS.set(0)
-        HEALTH.set(0)
-        healthy = False
-        paused = True
-        miner_process = None
+    eng.pipeline.on_hashrate = lambda gh: (on_hr(gh), eng._on_hashrate(gh))
+    return eng
 
 
 def handle_mesh_command(msg):
-    global current_intensity, paused
-
+    global engine
+    if engine is None:
+        return
     if not isinstance(msg, dict):
         return
-
     payload = msg.get("payload", msg)
     action = payload.get("action") or msg.get("action")
 
     if action == "adjust_intensity":
-        new_intensity = str(payload.get("factor", current_intensity))
-        logger.info(f"[MESH CMD] Adjusting intensity to {new_intensity}")
-        if miner_process:
-            stop_miner()
-            time.sleep(2)
-            start_miner(new_intensity)
-        else:
-            current_intensity = new_intensity
-
+        new_i = str(payload.get("factor", engine.cfg.intensity))
+        logger.info(f"[MESH] intensity → {new_i}")
+        engine.set_intensity(new_i)
     elif action == "pause":
-        logger.info("[MESH CMD] Pausing miner")
-        stop_miner()
-        paused = True
-
+        logger.info("[MESH] pause")
+        engine.stop()
+        WORKER_STATUS.set(0)
     elif action == "resume":
-        logger.info("[MESH CMD] Resuming miner")
-        if paused or not miner_process:
-            start_miner(current_intensity)
-
+        logger.info("[MESH] resume")
+        engine.start()
+        WORKER_STATUS.set(1)
     elif action == "restart_miner":
-        logger.info("[MESH CMD] Restarting miner")
-        stop_miner()
-        time.sleep(3)
-        start_miner(current_intensity)
-
+        logger.info("[MESH] restart")
+        engine.restart()
     else:
-        logger.info(f"[MESH CMD] Unknown command received: {action}")
+        logger.info(f"[MESH] unknown action: {action}")
 
 
 def shutdown_handler(signum, frame):
-    logger.info("Shutdown signal received")
-    stop_miner()
+    logger.info("shutdown")
+    if engine:
+        engine.stop()
     try:
         comms.close()
     except Exception:
@@ -151,103 +95,61 @@ def shutdown_handler(signum, frame):
 
 
 def main():
-    global healthy
+    global engine
 
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
 
-    prom.start_http_server(8000)
-    logger.info(f"[MESH] Aurora Miner Worker started ({GPUS_PER_POD} GPU(s)) - joining comms mesh...")
+    prom.start_http_server(int(os.getenv("WORKER_METRICS_PORT", "9100")))
+    logger.info("[MESH] MiningEngine worker joining…")
 
-    caps = ["gpu_mining", "intensity_control", "pause_resume", "restart"]
-    meta = {"gpus": GPUS_PER_POD, "pool": POOL_URL, "wallet": WALLET}
+    caps = ["gpu_mining", "intensity_control", "pause_resume", "restart", "mining_engine"]
+    meta = {
+        "gpus": int(os.getenv("GPUS_PER_POD", "1")),
+        "pool": os.getenv("POOL_URL", ""),
+        "wallet": os.getenv("MINING_WALLET", ""),
+    }
     try:
         from mods.btc_identity.identity import NodeIdentity
+
         ident = NodeIdentity(comms)
-        view = ident.identity_view()
-        meta["btc_identity"] = {
-            "fingerprint": view.get("fingerprint"),
-            "address_style": view.get("address_style"),
-            "backend": view.get("backend"),
-        }
-        caps = caps + ["btc_identity"]
-        logger.info(f"[MESH] btc_identity fingerprint={view.get('fingerprint')}")
-        ident.register_with_identity(
-            capabilities=caps,
-            metadata={"gpus": GPUS_PER_POD, "pool": POOL_URL, "wallet": WALLET},
-        )
+        ident.register_with_identity(capabilities=caps, metadata=meta)
     except Exception as e:
-        logger.debug(f"btc_identity optional: {e}")
+        logger.debug(f"identity optional: {e}")
         comms.register_node(node_type="worker", capabilities=caps, metadata=meta)
 
     comms.heartbeat()
-    comms.subscribe(f"node:{comms.node_id}", handle_mesh_command)
+    try:
+        # mesh command channels used by dashboard broadcast
+        from comms.layer import SwarmMessage
 
-    last_health_report = time.time()
-    last_mesh_heartbeat = time.time()
+        def _wrap(msg: SwarmMessage):
+            handle_mesh_command(msg.model_dump() if hasattr(msg, "model_dump") else msg.dict())
 
-    start_miner()
+        comms.subscribe("command.workers", _wrap)
+        comms.subscribe(f"command.node.{comms.node_id}", _wrap)
+    except Exception as e:
+        logger.warning(f"subscribe: {e}")
+
+    engine = _build_engine()
+    if not engine.cfg.wallet:
+        logger.warning("MINING_WALLET empty — miner may fail auth at pool")
+    ok = engine.start()
+    WORKER_STATUS.set(1 if ok else 0)
+    HEALTH.set(1 if ok else 0)
 
     while True:
         try:
-            if miner_process is None and not paused:
-                start_miner(current_intensity)
-                time.sleep(5)
-                continue
-
-            if miner_process:
-                for line in miner_process.stdout:
-                    hashrate = parse_hashrate(line)
-                    if hashrate > 0:
-                        gh = hashrate / 1e9
-                        HASH_RATE.set(round(gh, 2))
-                        comms.publish_telemetry({"hashrate_ghs": round(gh, 2), "status": "mining"})
-                        comms.set_state("worker:hashrate", round(gh, 2))
-                        comms.set_state(
-                            f"worker:{comms.node_id}:hashrate",
-                            {"hashrate_ghs": round(gh, 2), "ts": time.time(), "status": "mining"},
-                            expire=120,
-                        )
-
-                    if "accepted" in line.lower():
-                        SHARES_ACCEPTED.inc()
-                        current = comms.get_state("cluster:shares_accepted", 0) or 0
-                        try:
-                            current = int(current)
-                        except Exception:
-                            current = 0
-                        comms.set_state("cluster:shares_accepted", current + 1)
-
-                    now = time.time()
-                    if now - last_health_report > 30:
-                        gh_state = 0.0
-                        try:
-                            gh_state = float(comms.get_state("worker:hashrate") or 0)
-                        except Exception:
-                            pass
-                        comms.heartbeat(
-                            metadata={
-                                "status": "mining" if healthy else "degraded",
-                                "intensity": current_intensity,
-                                "hashrate_ghs": gh_state,
-                            }
-                        )
-                        comms.publish_event(
-                            "worker_heartbeat",
-                            {"healthy": healthy, "intensity": current_intensity, "hashrate_ghs": gh_state},
-                        )
-                        last_health_report = now
-
-                    if now - last_mesh_heartbeat > 15:
-                        comms.heartbeat()
-                        last_mesh_heartbeat = now
-
-            time.sleep(1)
-
+            st = engine.status()
+            if st.get("shares_accepted"):
+                # prometheus counter is monotonic — set via inc in pipeline path optionally
+                pass
+            HEALTH.set(1 if st.get("running") else 0)
+            WORKER_STATUS.set(0 if st.get("paused") else (1 if st.get("running") else 0))
+            time.sleep(5)
         except Exception as e:
-            logger.error(f"Worker error: {e}")
+            logger.error(f"worker loop: {e}")
             HEALTH.set(0)
-            healthy = False
             time.sleep(10)
 
 

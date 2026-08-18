@@ -1,0 +1,147 @@
+"""
+MiningEngine — tandem brain around a real hasher (bfgminer).
+
+Python owns: lifecycle, share→provenance, adaptive intensity, fleet state.
+GPU owns: SHA256d throughput via bfgminer OpenCL.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from typing import Any, Optional
+
+from .adaptive import AdaptiveIntensity
+from .backends import BfgminerBackend, MinerConfig
+from .coordinator import MiningCoordinator
+from .share_pipeline import SharePipeline
+
+logger = logging.getLogger("aurora.mining.engine")
+
+
+class MiningEngine:
+    def __init__(self, comms: Any, **kwargs):
+        self.comms = comms
+        self.worker_id = kwargs.get("worker_id") or comms.node_id
+        self.cfg = MinerConfig(
+            pool_url=kwargs.get("pool_url") or os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333"),
+            wallet=kwargs.get("wallet") or os.getenv("MINING_WALLET", ""),
+            worker_name=kwargs.get("worker_name") or self.worker_id,
+            intensity=str(kwargs.get("intensity") or os.getenv("INTENSITY", "19")),
+            gpus=int(kwargs.get("gpus") or os.getenv("GPUS_PER_POD", "1")),
+            binary=kwargs.get("binary") or os.getenv("BFGMINER_BIN", "bfgminer"),
+        )
+        self.backend = BfgminerBackend(self.cfg)
+        self.pipeline = SharePipeline(
+            comms,
+            worker_id=self.worker_id,
+            pool_id=self.cfg.pool_url,
+            facility_domain=kwargs.get("facility_domain") or os.getenv("FACILITY_DOMAIN", "unknown"),
+            on_hashrate=self._on_hashrate,
+        )
+        self.adaptive = AdaptiveIntensity()
+        self.coord = MiningCoordinator(comms)
+        self.paused = False
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._adaptive_enabled = os.getenv("AURORA_MINING_ADAPTIVE", "1") not in ("0", "false", "no")
+        self._last_adapt = 0.0
+
+    def _on_hashrate(self, gh: float):
+        self.adaptive.observe(gh)
+        self.coord.publish_worker(
+            self.worker_id,
+            {
+                **self.pipeline.snapshot(),
+                "intensity": self.cfg.intensity,
+                "paused": self.paused,
+                "running": self.backend.running(),
+                "pool": self.cfg.pool_url,
+            },
+        )
+
+    def start(self) -> bool:
+        self.paused = False
+        ok = self.backend.start()
+        if ok and (self._thread is None or not self._thread.is_alive()):
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="mining-engine", daemon=True)
+            self._thread.start()
+        return ok
+
+    def stop(self):
+        self.paused = True
+        self.backend.stop()
+
+    def restart(self):
+        self.stop()
+        time.sleep(2)
+        return self.start()
+
+    def set_intensity(self, intensity: str):
+        self.cfg.intensity = str(intensity)
+        self.backend.set_intensity(str(intensity))
+        if self.backend.running():
+            self.restart()
+
+    def status(self) -> dict:
+        return {
+            "worker_id": self.worker_id,
+            "running": self.backend.running(),
+            "paused": self.paused,
+            "intensity": self.cfg.intensity,
+            "pool": self.cfg.pool_url,
+            "wallet_set": bool(self.cfg.wallet),
+            "backend_available": self.backend.available(),
+            "adaptive": self._adaptive_enabled,
+            **self.pipeline.snapshot(),
+            "fleet": self.coord.fleet_view(),
+        }
+
+    def _loop(self):
+        while not self._stop.is_set():
+            if self.paused:
+                time.sleep(1)
+                continue
+            if not self.backend.running():
+                self.backend.start()
+                time.sleep(3)
+                continue
+            stream = self.backend.stdout()
+            if not stream:
+                time.sleep(1)
+                continue
+            try:
+                line = stream.readline()
+                if not line:
+                    time.sleep(0.2)
+                    continue
+                self.pipeline.handle_line(line)
+            except Exception as e:
+                logger.debug(f"read line: {e}")
+                time.sleep(1)
+
+            now = time.time()
+            if self._adaptive_enabled and now - self._last_adapt > 90:
+                self._last_adapt = now
+                try:
+                    thermal = self.adaptive.thermal_hint_from_comms(self.comms)
+                    nxt = self.adaptive.suggest(int(float(self.cfg.intensity)), thermal_scale=thermal)
+                    if str(nxt) != str(self.cfg.intensity):
+                        logger.info(f"adaptive intensity {self.cfg.intensity} → {nxt}")
+                        self.set_intensity(str(nxt))
+                except Exception as e:
+                    logger.debug(f"adaptive: {e}")
+
+            try:
+                self.comms.heartbeat(
+                    metadata={
+                        "status": "mining" if self.backend.running() else "stopped",
+                        "intensity": self.cfg.intensity,
+                        "hashrate_ghs": self.pipeline.last_hashrate_ghs,
+                    }
+                )
+            except Exception:
+                pass
