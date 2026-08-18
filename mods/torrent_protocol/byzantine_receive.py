@@ -3,13 +3,14 @@ Byzantine verify-on-receive for TorrentManager.
 
 Wraps _on_piece_data so invalid pieces never enter local state.
 Soft-imports asset_fabric helpers; no-ops if unavailable.
+Also attaches PieceChallenger for claimed→verified possession.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger("aurora.torrent.byz")
 
@@ -30,14 +31,6 @@ def _try_imports():
 
 
 def attach_byzantine_receive(manager: Any) -> bool:
-    """
-    Mutates manager in place:
-      - peer_evidence, possession trackers
-      - ensures meta.merkle_root when possible
-      - wraps _on_piece_data with full verify path
-      - publishes asset.complete after assemble when possible
-    Returns True if Byzantine path attached.
-    """
     merkle_root_from_piece_hashes, verify_piece, PeerEvidence, PossessionTracker = _try_imports()
     if not verify_piece:
         return False
@@ -47,7 +40,6 @@ def attach_byzantine_receive(manager: Any) -> bool:
     if PossessionTracker and not getattr(manager, "possession", None):
         manager.possession = PossessionTracker()
 
-    # Ensure merkle roots on existing / new metas
     orig_create = manager.create_torrent
 
     def create_torrent_wrapped(*args, **kwargs):
@@ -119,10 +111,6 @@ def attach_byzantine_receive(manager: Any) -> bool:
                         manager.peer_evidence.record_invalid_piece(src, "merkle_verify_failed")
                     return
 
-            # Delegate rest of pipeline to original (pending/have/write/assemble)
-            # but original will re-check hashes — fine. We pre-validated.
-            # To avoid double-work, call original which also validates.
-            # Prefer recording success after original accepts — monkey by checking have set after.
             before = set(manager.have.get(infohash, set()))
             orig_on_piece(msg)
             after = set(manager.have.get(infohash, set()))
@@ -140,7 +128,6 @@ def attach_byzantine_receive(manager: Any) -> bool:
 
     manager._on_piece_data = on_piece_data_wrapped  # type: ignore
 
-    # asset.complete on assemble
     orig_assemble = manager._assemble_and_finish
 
     def assemble_wrapped(infohash: str):
@@ -167,6 +154,40 @@ def attach_byzantine_receive(manager: Any) -> bool:
             logger.debug(f"asset.complete: {e}")
 
     manager._assemble_and_finish = assemble_wrapped  # type: ignore
+
+    # Mesh challenges for claimed possession
+    try:
+        from mods.asset_fabric.challenge import PieceChallenger
+
+        def _get_piece(asset_id: str, idx: int) -> Optional[bytes]:
+            data = manager.pieces.get(asset_id, {}).get(idx)
+            if data:
+                return data
+            p = manager._piece_path(asset_id, idx)
+            if p.exists():
+                return p.read_bytes()
+            meta = manager.torrents.get(asset_id)
+            complete = manager._complete_path(asset_id, meta.name if meta else None)
+            if complete and complete.exists() and meta:
+                blob = complete.read_bytes()
+                start = idx * meta.piece_size
+                return blob[start : start + meta.piece_size]
+            return None
+
+        def _get_meta(asset_id: str):
+            meta = manager.torrents.get(asset_id)
+            return meta.to_dict() if meta else None
+
+        manager.challenger = PieceChallenger(
+            manager.comms,
+            get_piece=_get_piece,
+            get_meta=_get_meta,
+            peer_evidence=manager.peer_evidence,
+            possession=manager.possession,
+        )
+        logger.info(f"PieceChallenger attached on {manager.node_id}")
+    except Exception as e:
+        logger.debug(f"PieceChallenger not attached: {e}")
 
     logger.info(f"Byzantine verify-on-receive attached on {manager.node_id}")
     return True
