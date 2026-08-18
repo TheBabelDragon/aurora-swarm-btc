@@ -30,17 +30,20 @@ class AssetFabric:
     Usage:
         fabric = AssetFabric(comms)
         asset_id = fabric.publish("/path/to/model.pt", asset_type="model")
-        fabric.ensure(asset_id)          # pull onto this node if missing
+        fabric.ensure(asset_id)
         print(fabric.possession(asset_id))
+
+        # Optional attestation at publish time:
+        asset_id = fabric.publish("/path/to/model.pt", asset_type="model", anchor=True)
     """
 
     def __init__(self, comms: CommsLayer, storage_dir: Optional[str] = None):
         self.comms = comms
         self.node_id = comms.node_id
-
-        # Lazy-bind the current transport implementation
         self._tm = None
         self._storage_dir = storage_dir
+        self._anchor = None
+        self._anchor_tried = False
 
     def _transport(self):
         if self._tm is None:
@@ -53,8 +56,21 @@ class AssetFabric:
             )
         return self._tm
 
+    def _get_anchor(self):
+        """Soft dependency on btc_anchor — never required for basic operation."""
+        if self._anchor_tried:
+            return self._anchor
+        self._anchor_tried = True
+        try:
+            from mods.btc_anchor.anchor import AssetAnchor
+            self._anchor = AssetAnchor(self.comms)
+        except Exception as e:
+            logger.debug(f"btc_anchor not available: {e}")
+            self._anchor = None
+        return self._anchor
+
     # ------------------------------------------------------------------
-    # Public API — the durable verbs
+    # Public API
     # ------------------------------------------------------------------
 
     def publish(
@@ -65,11 +81,15 @@ class AssetFabric:
         asset_type: str = "blob",
         provenance: Optional[Dict[str, Any]] = None,
         announce: bool = True,
+        anchor: bool = False,
     ) -> Optional[str]:
         """
         Turn a local file into a swarm asset and (by default) announce it.
 
-        Returns asset_id (content-addressed) or None on failure.
+        If anchor=True and btc_anchor is available, also records a content
+        commitment on the mesh (optional path toward on-chain attestation).
+
+        Returns asset_id or None on failure.
         """
         try:
             tm = self._transport()
@@ -80,9 +100,22 @@ class AssetFabric:
             manifest = AssetManifest.from_torrent_meta(
                 meta, asset_type=asset_type, provenance=provenance
             )
-            # Store durable manifest alongside transport meta
             self._store_manifest(manifest)
-            logger.info(f"Published asset {manifest.fingerprint()}… type={asset_type} name={manifest.name}")
+
+            if anchor:
+                anc = self._get_anchor()
+                if anc:
+                    try:
+                        anc.anchor_manifest(manifest)
+                    except Exception as e:
+                        logger.warning(f"Optional anchor failed (asset still published): {e}")
+                else:
+                    logger.debug("anchor=True requested but btc_anchor not loaded")
+
+            logger.info(
+                f"Published asset {manifest.fingerprint()}… type={asset_type} "
+                f"name={manifest.name} anchored={bool(anchor)}"
+            )
             return manifest.asset_id
         except Exception as e:
             logger.exception(f"publish failed: {e}")
@@ -94,14 +127,6 @@ class AssetFabric:
         *,
         policy: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """
-        Make sure this node possesses the asset.
-
-        This is the primary public verb. Policy is reserved for future
-        locality / priority / replication hints; currently accepted and logged.
-
-        Returns True if the asset is already complete or a download was started.
-        """
         policy = policy or {}
         asset_id = target.asset_id if isinstance(target, AssetManifest) else str(target).strip().lower()
 
@@ -118,17 +143,12 @@ class AssetFabric:
             return False
 
     def possession(self, asset_id: str) -> Dict[str, Any]:
-        """
-        Local possession view for an asset.
-
-        Returns a stable dict the scheduler can reason about:
-            { asset_id, complete, percent, have, total, path, wanted }
-        """
         asset_id = str(asset_id).strip().lower()
         tm = self._transport()
         prog = tm.get_progress(asset_id)
         path = tm.get_path(asset_id)
-        return {
+
+        result = {
             "asset_id": asset_id,
             "complete": bool(prog.get("complete")),
             "percent": prog.get("percent", 0.0),
@@ -137,10 +157,28 @@ class AssetFabric:
             "wanted": bool(prog.get("wanted")),
             "path": str(path) if path else None,
             "name": prog.get("name"),
+            "anchor": None,
         }
 
+        # Soft-enrich with attestation status when available
+        anc = self._get_anchor()
+        if anc:
+            try:
+                rec = anc.get(asset_id)
+                if rec:
+                    result["anchor"] = {
+                        "status": rec.status,
+                        "commitment": rec.commitment,
+                        "txid": rec.txid,
+                        "method": rec.method,
+                        "created_at": rec.created_at,
+                    }
+            except Exception:
+                pass
+
+        return result
+
     def list_assets(self) -> List[Dict[str, Any]]:
-        """All assets known to the local transport, in possession form."""
         tm = self._transport()
         out = []
         for t in tm.list_torrents():
@@ -151,14 +189,12 @@ class AssetFabric:
         return out
 
     def get_manifest(self, asset_id: str) -> Optional[AssetManifest]:
-        """Load a previously stored durable manifest if available."""
         try:
             raw = self.comms.get_state(f"asset:manifest:{asset_id}")
             if raw and isinstance(raw, dict):
                 return AssetManifest.from_dict(raw)
         except Exception:
             pass
-        # Fallback: synthesize from transport meta if present
         tm = self._transport()
         meta = tm.torrents.get(asset_id)
         if meta:
@@ -171,16 +207,12 @@ class AssetFabric:
     def path(self, asset_id: str) -> Optional[Path]:
         return self._transport().get_path(str(asset_id).strip().lower())
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
     def _store_manifest(self, manifest: AssetManifest):
         try:
             self.comms.set_state(
                 f"asset:manifest:{manifest.asset_id}",
                 manifest.to_dict(),
-                expire=86400 * 7,  # one week; can be made permanent later
+                expire=86400 * 7,
             )
         except Exception as e:
             logger.debug(f"Could not store manifest: {e}")
