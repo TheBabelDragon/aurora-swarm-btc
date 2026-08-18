@@ -1,11 +1,10 @@
 from fastapi import FastAPI, Request, Form, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from control.bus import Bus
 from comms.layer import CommsLayer, SwarmMessage
 import uvicorn
 import logging
 import time
-import tempfile
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -93,7 +92,7 @@ async def command_to_node(node_id: str, action: str = Form(...), factor: float =
     return {"status": "sent", "action": action, "target": node_id}
 
 # =====================================================================
-# TORRENT / ASSET TRANSFER MANAGER API
+# ASSET TRANSFER MANAGER API
 # =====================================================================
 
 @app.get("/torrent/status")
@@ -104,11 +103,17 @@ def torrent_status():
     local = []
     if tm:
         local = tm.list_torrents()
+        # Enrich with size from meta when possible
+        for t in local:
+            meta = tm.torrents.get(t.get("infohash"))
+            if meta:
+                t["size"] = meta.size
+                t["name"] = t.get("name") or meta.name
 
     announced = []
     try:
         keys = comms.r.keys("aurora:torrent:*") if hasattr(comms, "r") else []
-        for k in keys[:50]:
+        for k in keys[:60]:
             key = k.replace("aurora:", "", 1) if k.startswith("aurora:") else k
             raw = comms.get_state(key)
             if isinstance(raw, dict) and "infohash" in raw:
@@ -143,11 +148,9 @@ def torrent_list():
 
 @app.post("/torrent/upload")
 async def torrent_upload(file: UploadFile = File(...), name: str = Form(None)):
-    """Upload a file → create torrent → announce. Dashboard becomes the initial seeder."""
     tm = get_torrent_manager()
     if not tm:
         return JSONResponse({"status": "error", "detail": "No local TorrentManager"}, status_code=400)
-
     if not file.filename:
         return JSONResponse({"status": "error", "detail": "No filename"}, status_code=400)
 
@@ -173,9 +176,6 @@ async def torrent_upload(file: UploadFile = File(...), name: str = Form(None)):
     except Exception as e:
         logger.exception("Upload/create torrent failed")
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
-    finally:
-        # Keep the file so the manager can seed it; optional cleanup later
-        pass
 
 @app.post("/torrent/ensure")
 async def torrent_ensure(infohash: str = Form(...), name: str = Form(None)):
@@ -216,16 +216,28 @@ async def torrent_announce(infohash: str = Form(...)):
 
 @app.post("/torrent/cancel")
 async def torrent_cancel(infohash: str = Form(...)):
-    """Remove from the wanted set so the manager stops trying."""
     tm = get_torrent_manager()
     if not tm:
         return JSONResponse({"status": "error", "detail": "No local TorrentManager"}, status_code=400)
     infohash = infohash.strip().lower()
     tm.wanted.discard(infohash)
-    # Also clear pending so it stops requesting
     tm.pending.pop(infohash, None)
     logger.info(f"[DASH] Cancelled / removed from wanted: {infohash[:12]}…")
     return {"status": "ok", "infohash": infohash}
+
+@app.get("/torrent/file/{infohash}")
+def torrent_file(infohash: str):
+    """Download a completed asset from the dashboard node."""
+    tm = get_torrent_manager()
+    if not tm:
+        return JSONResponse({"status": "error", "detail": "No local TorrentManager"}, status_code=400)
+    infohash = infohash.strip().lower()
+    path = tm.get_path(infohash)
+    if not path or not path.exists():
+        return JSONResponse({"status": "error", "detail": "File not found or not complete"}, status_code=404)
+    meta = tm.torrents.get(infohash)
+    filename = meta.name if meta else path.name
+    return FileResponse(path, filename=filename, media_type="application/octet-stream")
 
 @app.get("/healthz")
 def healthz():
@@ -245,17 +257,19 @@ def root():
             .card { background: #111; border: 1px solid #0f0; padding: 20px; margin: 20px 0; border-radius: 8px; }
             pre { background: #000; padding: 15px; overflow-x: auto; font-size: 0.85em; }
             .metric { font-size: 2em; font-weight: bold; }
-            button { background: #003300; color: #0f0; border: 1px solid #0f0; padding: 8px 16px; margin: 4px; cursor: pointer; border-radius: 4px; }
+            button { background: #003300; color: #0f0; border: 1px solid #0f0; padding: 7px 14px; margin: 3px; cursor: pointer; border-radius: 4px; font-size: 0.9em; }
             button:hover { background: #005500; }
+            button:disabled { opacity: 0.5; cursor: not-allowed; }
             button.danger { background: #300; border-color: #f66; color: #f66; }
             button.danger:hover { background: #500; }
+            button.small { padding: 4px 10px; font-size: 0.8em; }
             .control-group { margin: 15px 0; }
             input, input[type=file] { background: #000; color: #0f0; border: 1px solid #0f0; padding: 6px; margin: 4px; border-radius: 4px; }
             input[type=text] { width: 260px; }
             .success { color: #0f0; }
             .error { color: #f66; }
-            .progress-bar { background: #222; border: 1px solid #0f0; height: 16px; border-radius: 4px; overflow: hidden; margin: 4px 0 6px 0; }
-            .progress-fill { background: #0a0; height: 100%; transition: width 0.4s; }
+            .progress-bar { background: #222; border: 1px solid #0f0; height: 14px; border-radius: 4px; overflow: hidden; margin: 4px 0 4px 0; }
+            .progress-fill { background: #0a0; height: 100%; transition: width 0.35s; }
             .muted { color: #6a6; font-size: 0.85em; }
             .badge { display: inline-block; background: #003300; border: 1px solid #0f0; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; margin-left: 4px; }
             .badge.warn { background: #330; border-color: #aa0; color: #ff0; }
@@ -265,6 +279,8 @@ def root():
             th { color: #6a6; font-weight: normal; font-size: 0.8em; }
             .section { margin-top: 22px; }
             .empty { color: #555; font-style: italic; }
+            .mono { font-family: ui-monospace, monospace; font-size: 0.85em; }
+            .row-actions { white-space: nowrap; }
         </style>
     </head>
     <body>
@@ -276,46 +292,41 @@ def root():
             <div id="status">Loading...</div>
         </div>
 
-        <!-- ===================== ASSET TRANSFER MANAGER ===================== -->
         <div class="card">
             <h2>Asset Transfer Manager</h2>
             <div id="torrent_summary" class="muted">Loading…</div>
 
-            <!-- UPLOAD -->
             <div class="section">
                 <h3>Upload & Seed</h3>
-                <p class="muted">Upload a file. The dashboard becomes the initial seeder and announces it to the swarm.</p>
+                <p class="muted">Upload any file. Dashboard becomes the initial seeder and announces it to the mesh.</p>
                 <input type="file" id="upload_file">
                 <input type="text" id="upload_name" placeholder="optional display name">
-                <button onclick="uploadAsset()">Upload & Announce</button>
+                <button id="upload_btn" onclick="uploadAsset()">Upload & Announce</button>
             </div>
 
-            <!-- ENSURE / DOWNLOAD -->
             <div class="section">
                 <h3>Download by Infohash</h3>
+                <p class="muted">Paste an infohash to pull an asset from the swarm onto this node (and tell every other manager too).</p>
                 <input type="text" id="ensure_infohash" placeholder="infohash">
                 <input type="text" id="ensure_name" placeholder="optional name" style="width:160px">
                 <button onclick="ensureAsset()">Ensure / Download</button>
                 <button onclick="forceAnnounce()">Force Announce</button>
             </div>
 
-            <div id="torrent_result" style="min-height: 22px; margin: 10px 0;"></div>
+            <div id="torrent_result" style="min-height: 22px; margin: 12px 0;"></div>
 
-            <!-- DOWNLOADING -->
             <div class="section">
                 <h3>Downloading</h3>
                 <div id="downloading_list" class="empty">None</div>
             </div>
 
-            <!-- SEEDING / COMPLETED -->
             <div class="section">
                 <h3>Seeding / Completed</h3>
                 <div id="seeding_list" class="empty">None</div>
             </div>
 
-            <!-- ANNOUNCED ONLY -->
             <div class="section">
-                <h3>Announced on Mesh (not local)</h3>
+                <h3>Announced on Mesh (not held here)</h3>
                 <div id="announced_list" class="empty">None</div>
             </div>
         </div>
@@ -354,11 +365,19 @@ def root():
 
         <script>
             function fmtSize(n) {
-                if (!n && n !== 0) return '—';
+                if (n === undefined || n === null) return '—';
                 if (n < 1024) return n + ' B';
                 if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
                 if (n < 1073741824) return (n/1048576).toFixed(1) + ' MB';
                 return (n/1073741824).toFixed(2) + ' GB';
+            }
+
+            function copyText(text) {
+                navigator.clipboard.writeText(text).then(() => {
+                    showTorrentResult('Copied infohash', true);
+                }).catch(() => {
+                    showTorrentResult('Copy failed', false);
+                });
             }
 
             async function refresh() {
@@ -379,20 +398,23 @@ def root():
                 } catch(e) { console.error(e); }
             }
 
-            function renderTorrentTable(items, opts = {}) {
+            function renderTorrentTable(items, mode) {
                 if (!items || items.length === 0) return '<p class="empty">None</p>';
                 let html = `<table><thead><tr>
-                    <th>Name / Infohash</th><th>Progress</th><th>Pieces</th><th>Status</th><th></th>
+                    <th>Name / Infohash</th><th>Size</th><th>Progress</th><th>Pieces</th><th>Status</th><th></th>
                 </tr></thead><tbody>`;
                 for (const t of items) {
                     const pct = t.percent || 0;
-                    const complete = t.complete;
+                    const complete = !!t.complete;
+                    const ih = t.infohash || '';
                     html += `<tr>
                         <td>
                             <strong>${t.name || '—'}</strong><br>
-                            <span class="muted">${(t.infohash||'').slice(0,18)}…</span>
+                            <span class="mono muted">${ih.slice(0,20)}${ih.length>20?'…':''}</span>
+                            <button class="small" onclick="copyText('${ih}')">Copy</button>
                         </td>
-                        <td style="min-width:140px">
+                        <td>${fmtSize(t.size)}</td>
+                        <td style="min-width:130px">
                             <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
                             ${pct}%
                         </td>
@@ -402,9 +424,12 @@ def root():
                             ${t.wanted && !complete ? '<span class="badge">wanted</span>' : ''}
                             ${t.pending ? `<span class="muted"> · ${t.pending} pending</span>` : ''}
                         </td>
-                        <td>
-                            ${!complete ? `<button class="danger" onclick="cancelTorrent('${t.infohash}')">Cancel</button>` : ''}
-                            ${complete ? `<button onclick="forceAnnounceHash('${t.infohash}')">Re-announce</button>` : ''}
+                        <td class="row-actions">
+                            ${!complete ? `<button class="danger small" onclick="cancelTorrent('${ih}')">Cancel</button>` : ''}
+                            ${complete ? `
+                                <a href="/torrent/file/${ih}"><button class="small">Download</button></a>
+                                <button class="small" onclick="forceAnnounceHash('${ih}')">Re-announce</button>
+                            ` : ''}
                         </td>
                     </tr>`;
                 }
@@ -420,25 +445,27 @@ def root():
                         (data.dashboard_has_manager
                             ? ' <span class="badge ok">manager online</span>'
                             : ' <span class="badge warn">no local manager</span>') +
-                        ` <span class="muted">· ${ (data.downloading||[]).length } downloading · ${ (data.seeding||[]).length } seeding</span>`;
+                        ` <span class="muted">· ${(data.downloading||[]).length} downloading · ${(data.seeding||[]).length} seeding</span>`;
 
-                    document.getElementById('downloading_list').innerHTML = renderTorrentTable(data.downloading || []);
-                    document.getElementById('seeding_list').innerHTML = renderTorrentTable(data.seeding || []);
+                    document.getElementById('downloading_list').innerHTML = renderTorrentTable(data.downloading || [], 'down');
+                    document.getElementById('seeding_list').innerHTML = renderTorrentTable(data.seeding || [], 'seed');
 
-                    // Announced only
                     const localHashes = new Set((data.local_torrents || []).map(t => t.infohash));
                     const onlyAnnounced = (data.announced_torrents || []).filter(t => !localHashes.has(t.infohash));
                     if (onlyAnnounced.length === 0) {
                         document.getElementById('announced_list').innerHTML = '<p class="empty">None</p>';
                     } else {
-                        let html = '<table><thead><tr><th>Name</th><th>Infohash</th><th>Pieces</th><th>By</th><th></th></tr></thead><tbody>';
+                        let html = '<table><thead><tr><th>Name</th><th>Size</th><th>Infohash</th><th>Pieces</th><th>By</th><th></th></tr></thead><tbody>';
                         for (const t of onlyAnnounced) {
+                            const ih = t.infohash || '';
+                            const safeName = (t.name || '').replace(/'/g, "");
                             html += `<tr>
                                 <td>${t.name || '—'}</td>
-                                <td class="muted">${(t.infohash||'').slice(0,18)}…</td>
+                                <td>${fmtSize(t.size)}</td>
+                                <td class="mono muted">${ih.slice(0,18)}… <button class="small" onclick="copyText('${ih}')">Copy</button></td>
                                 <td>${t.num_pieces || '?'}</td>
                                 <td class="muted">${t.created_by || '?'}</td>
-                                <td><button onclick="ensureHash('${t.infohash}', '${(t.name||'').replace(/'/g,"")}');">Download</button></td>
+                                <td><button class="small" onclick="ensureHash('${ih}', '${safeName}')">Download</button></td>
                             </tr>`;
                         }
                         html += '</tbody></table>';
@@ -453,6 +480,7 @@ def root():
             async function uploadAsset() {
                 const fileInput = document.getElementById('upload_file');
                 const name = document.getElementById('upload_name').value.trim();
+                const btn = document.getElementById('upload_btn');
                 if (!fileInput.files || !fileInput.files[0]) {
                     showTorrentResult('Choose a file first', false);
                     return;
@@ -461,20 +489,23 @@ def root():
                 formData.append('file', fileInput.files[0]);
                 if (name) formData.append('name', name);
 
+                btn.disabled = true;
                 showTorrentResult('Uploading & creating torrent…', true);
                 try {
                     const res = await fetch('/torrent/upload', { method: 'POST', body: formData });
                     const data = await res.json();
                     if (data.status === 'ok') {
-                        showTorrentResult(`✓ Seeded ${data.name} → ${data.infohash.slice(0,12)}… (${fmtSize(data.size)})`, true);
+                        showTorrentResult(`✓ Seeded “${data.name}” → ${data.infohash.slice(0,12)}… (${fmtSize(data.size)}, ${data.num_pieces} pieces)`, true);
                         fileInput.value = '';
                         document.getElementById('upload_name').value = '';
-                        setTimeout(refreshTorrent, 600);
+                        setTimeout(refreshTorrent, 500);
                     } else {
                         showTorrentResult(data.detail || 'Upload failed', false);
                     }
                 } catch (e) {
                     showTorrentResult('Upload error', false);
+                } finally {
+                    btn.disabled = false;
                 }
             }
 
@@ -494,7 +525,7 @@ def root():
                     const data = await res.json();
                     if (data.status === 'ok') {
                         showTorrentResult(`✓ Ensure published for ${data.infohash.slice(0,12)}…`, true);
-                        setTimeout(refreshTorrent, 700);
+                        setTimeout(refreshTorrent, 600);
                     } else {
                         showTorrentResult(data.detail || 'Failed', false);
                     }
@@ -515,7 +546,7 @@ def root():
                 try {
                     const res = await fetch('/torrent/announce', { method: 'POST', body: formData });
                     const data = await res.json();
-                    showTorrentResult(data.status === 'ok' ? `✓ Announced ${infohash.slice(0,12)}…` : 'Announce failed', data.status === 'ok');
+                    showTorrentResult(data.status === 'ok' ? `✓ Announced ${infohash.slice(0,12)}…` : 'Announce failed (not local?)', data.status === 'ok');
                 } catch (e) {
                     showTorrentResult('Error', false);
                 }
@@ -528,7 +559,7 @@ def root():
                     const res = await fetch('/torrent/cancel', { method: 'POST', body: formData });
                     const data = await res.json();
                     showTorrentResult(data.status === 'ok' ? `Cancelled ${infohash.slice(0,12)}…` : 'Cancel failed', data.status === 'ok');
-                    setTimeout(refreshTorrent, 500);
+                    setTimeout(refreshTorrent, 400);
                 } catch (e) {
                     showTorrentResult('Error', false);
                 }
@@ -538,7 +569,7 @@ def root():
                 const el = document.getElementById('torrent_result');
                 el.innerText = text;
                 el.className = success ? 'success' : 'error';
-                setTimeout(() => { el.innerText = ''; el.className = ''; }, 6000);
+                setTimeout(() => { if (el.innerText === text) { el.innerText = ''; el.className = ''; } }, 7000);
             }
 
             async function sendBroadcast(action, factor = null) {
@@ -575,7 +606,7 @@ def root():
             }
 
             refresh();
-            setInterval(refresh, 4000);
+            setInterval(refresh, 3500);
         </script>
     </body>
     </html>
