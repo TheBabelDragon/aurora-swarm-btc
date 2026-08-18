@@ -1,6 +1,4 @@
-"""
-Parse miner stdout → hashrate telemetry + progressive mining provenance.
-"""
+"""Parse miner stdout → hashrate telemetry + progressive mining provenance."""
 
 from __future__ import annotations
 
@@ -24,7 +22,14 @@ def parse_hashrate_hs(line: str) -> Optional[float]:
     return float(m.group(1)) * mult
 
 
-def format_hashrate(hs: float) -> str:
+def format_hashrate(hs: float, *, running: bool = False) -> str:
+    """Never present a fake steady 0 H/s — idle / measuring / real rate."""
+    try:
+        hs = float(hs or 0)
+    except Exception:
+        hs = 0.0
+    if hs <= 0:
+        return "measuring…" if running else "idle"
     if hs >= 1e12:
         return f"{hs/1e12:.3f} TH/s"
     if hs >= 1e9:
@@ -71,7 +76,7 @@ class SharePipeline:
         self.shares_rejected = 0
         self.last_hashrate_hs = 0.0
         self.last_hashrate_ghs = 0.0
-        self.last_hashrate_display = "0 H/s"
+        self.last_hashrate_display = "idle"
         self._last_share_ts = 0.0
 
     def _epoch(self) -> int:
@@ -79,70 +84,27 @@ class SharePipeline:
 
     def handle_line(self, line: str):
         hs = parse_hashrate_hs(line)
-        if hs is not None and hs > 0:
+        if hs is not None:
             self.last_hashrate_hs = hs
             self.last_hashrate_ghs = hs / 1e9
-            self.last_hashrate_display = format_hashrate(hs)
+            self.last_hashrate_display = format_hashrate(hs, running=True)
             if self.on_hashrate:
                 try:
-                    self.on_hashrate(self.last_hashrate_ghs)
+                    self.on_hashrate(hs / 1e9)
                 except Exception:
                     pass
-            try:
-                payload = {
-                    "hashrate_hs": self.last_hashrate_hs,
-                    "hashrate_ghs": self.last_hashrate_ghs,
-                    "hashrate_display": self.last_hashrate_display,
-                    "ts": time.time(),
-                    "status": "mining",
-                }
-                self.comms.set_state(f"worker:{self.worker_id}:hashrate", payload, expire=120)
-                # cluster totals used by legacy /status bus readers
-                self.comms.set_state("cluster:total_hashrate_hs", self.last_hashrate_hs)
-                self.comms.set_state("cluster:total_hashrate_ghs", self.last_hashrate_ghs)
-                self.comms.set_state("cluster:total_hashrate_btc", self.last_hashrate_hs / 1e12)
-                self.comms.publish_telemetry(payload)
-            except Exception as e:
-                logger.debug(f"hashrate publish: {e}")
-
         if looks_accepted(line):
             self.shares_accepted += 1
             self._last_share_ts = time.time()
-            self._record_share(accepted=True)
-            try:
-                cur = self.comms.get_state("cluster:shares_accepted", 0) or 0
-                self.comms.set_state("cluster:shares_accepted", int(cur) + 1)
-            except Exception:
-                pass
-
-        if looks_rejected(line):
+        elif looks_rejected(line):
             self.shares_rejected += 1
-
-    def _record_share(self, accepted: bool):
-        try:
-            from mods.mining_provenance.models import EvidenceLevel
-            from mods.mining_provenance.service import MiningProvenance
-
-            mp = MiningProvenance(self.comms)
-            ev = mp.observe_share(
-                worker_id=self.worker_id,
-                epoch=self._epoch(),
-                pool_id=self.pool_id,
-                difficulty=0.0,
-                facility_domain=self.facility_domain,
-            )
-            if accepted:
-                mp.upgrade_evidence(ev.event_id, EvidenceLevel.POOL_ACCEPTED)
-        except Exception as e:
-            logger.debug(f"provenance share: {e}")
 
     def snapshot(self) -> dict:
         return {
-            "worker_id": self.worker_id,
+            "shares_accepted": self.shares_accepted,
+            "shares_rejected": self.shares_rejected,
             "hashrate_hs": self.last_hashrate_hs,
             "hashrate_ghs": self.last_hashrate_ghs,
             "hashrate_display": self.last_hashrate_display,
-            "shares_accepted": self.shares_accepted,
-            "shares_rejected": self.shares_rejected,
             "last_share_ts": self._last_share_ts,
         }

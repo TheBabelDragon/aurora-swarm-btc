@@ -12,6 +12,7 @@ input,select{background:#000;color:#0f0;border:1px solid #0f0;padding:6px;margin
 .muted{color:#6a6}.mono{font-family:ui-monospace,monospace}.success{color:#0f0}.error{color:#f66}
 a{color:#0f0}
 #shared_window_status{padding:12px;border:1px solid #0f0;border-radius:6px;margin:10px 0;line-height:1.5}
+#mine_status{padding:12px;border:1px solid #0f0;border-radius:6px;margin:10px 0;line-height:1.5}
 </style></head><body>
 <h1>Aurora Swarm</h1>
 
@@ -45,6 +46,7 @@ a{color:#0f0}
 </div>
 
 <div class="card"><h2>Mining</h2>
+<div id="mine_status" class="muted">Checking miner…</div>
 <button type="button" onclick="startLocalMine()">Start mining</button>
 <button type="button" onclick="stopLocalMine()">Stop mining</button>
 <button type="button" onclick="registerIdentity()">Register identity</button>
@@ -90,11 +92,34 @@ function fetchTimeout(url, ms, opts){
 document.getElementById('chat_text').addEventListener('keydown', function(e){ if(e.key==='Enter') chatSend(); });
 function showT(m,ok){ var e=document.getElementById('torrent_msg'); if(e){ e.textContent=m; e.className=ok?'success':'error'; } }
 
+async function refreshMine(){
+  var box = document.getElementById('mine_status');
+  if(!box) return;
+  try{
+    var d = await fetchTimeout('/mining/engine/status', 6000).then(function(r){ return r.json(); });
+    if(!d.ok && d.error){
+      box.className = 'error';
+      box.innerHTML = '<strong>Miner error</strong> · '+d.error;
+      return;
+    }
+    var rate = d.hashrate_display || 'idle';
+    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = d.running ? 'measuring…' : 'idle';
+    box.className = d.running ? 'success' : 'muted';
+    var err = d.error ? (' · <span class="error">'+d.error+'</span>') : '';
+    box.innerHTML =
+      '<strong>'+(d.running?'RUNNING':'STOPPED')+'</strong> · <span class="metric" style="font-size:1.2em">'+rate+'</span><br>'+
+      '<span class="muted">'+(d.backend||'?')+' · pool '+(d.pool||'')+'</span>'+err;
+  }catch(e){
+    box.className = 'error';
+    box.textContent = 'Mining status unreachable — container may be restarting';
+  }
+}
+
 async function refresh(){
   try{
     var s = await fetchTimeout('/status', 8000).then(function(r){ return r.json(); });
     var rate = s.hashrate_display || (s.mining && s.mining.hashrate_display) || 'idle';
-    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = (s.mining && s.mining.running) ? 'warming up…' : 'idle';
+    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = (s.mining && s.mining.running) ? 'measuring…' : 'idle';
     var m = s.mining || {};
     document.getElementById('status').innerHTML =
       '<div class="metric">'+(s.active_workers||0)+' workers</div>'+
@@ -116,15 +141,23 @@ async function refresh(){
   }catch(e){
     document.getElementById('status').innerHTML = '<span class="error">Status unreachable</span>';
   }
+  refreshMine();
 }
 async function startLocalMine(){
+  showT('Starting…', true);
   try{
     var d=await fetchTimeout('/mining/engine/start',20000,{method:'POST'}).then(function(r){return r.json();});
-    showT(d.ok?('Mining '+(d.hashrate_display||'on')):(d.error||'fail'), !!d.ok); refresh();
-  }catch(e){ showT('timeout', false); }
+    var msg = d.already ? ('Already running · '+(d.hashrate_display||'')) :
+              (d.ok ? ('Mining '+(d.hashrate_display||'on')) : (d.error||'fail'));
+    showT(msg, !!d.ok);
+    refreshMine(); refresh();
+  }catch(e){ showT('start timeout', false); }
 }
 async function stopLocalMine(){
-  try{ await fetchTimeout('/mining/engine/stop',10000,{method:'POST'}); showT('stopped', true); refresh(); }catch(e){}
+  try{
+    await fetchTimeout('/mining/engine/stop',10000,{method:'POST'});
+    showT('stopped', true); refreshMine(); refresh();
+  }catch(e){ showT('stop timeout', false); }
 }
 async function nccRefreshNodes(){
   try{
@@ -177,6 +210,8 @@ async function runSelftest(){
     if(box) box.innerHTML=h;
   }catch(e){ if(box) box.textContent='timeout'; }
 }
-refresh(); setInterval(refresh, 4000);
+refresh(); refreshMine();
+setInterval(refresh, 4000);
+setInterval(refreshMine, 2000);
 </script>
 </body></html>

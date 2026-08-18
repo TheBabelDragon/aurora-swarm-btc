@@ -1,4 +1,4 @@
-"""Dashboard mining controls — Start/Stop real MiningEngine + mesh workers."""
+"""Dashboard mining controls — stable start/stop + truthful status."""
 
 from __future__ import annotations
 
@@ -15,36 +15,50 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
     @app.get("/mining/engine/status")
     def mining_engine_status():
         try:
-            from mods.mining_engine.coordinator import MiningCoordinator
             from dashboard.local_miner import local_status
 
-            fleet = MiningCoordinator(get_comms()).fleet_view()
-            local = local_status(get_comms())
-            return {"status": "ok", "local": local, **fleet}
+            st = local_status(get_comms()) or {}
+            return {
+                "ok": True,
+                "running": bool(st.get("running")),
+                "backend": st.get("backend") or "cpu_stratum",
+                "hashrate_hs": float(st.get("hashrate_hs") or 0),
+                "hashrate_display": st.get("hashrate_display") or ("measuring…" if st.get("running") else "idle"),
+                "wallet": st.get("wallet"),
+                "pool": st.get("pool"),
+                "error": st.get("error") or "",
+                "engine_built": bool(st.get("engine_built")),
+            }
         except Exception as e:
-            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+            logger.exception("status")
+            return JSONResponse({"ok": False, "error": str(e), "running": False, "hashrate_display": "error"}, status_code=500)
 
     @app.post("/mining/engine/start")
     async def mining_engine_start():
         try:
-            from dashboard.local_miner import start_local, wallet_configured
+            from dashboard.local_miner import local_status, start_local
 
-            wallet = wallet_configured()
-            local = start_local(get_comms())
-            mesh = {"ok": False}
-            try:
-                get_comms().broadcast_to_workers({"action": "resume"})
-                mesh = {"ok": True, "action": "resume", "target": "all_workers"}
-            except Exception as e:
-                mesh = {"ok": False, "error": str(e)}
-
-            ok = bool(local.get("ok") or mesh.get("ok"))
+            comms = get_comms()
+            # If already running, return current status — do not thrash
+            cur = local_status(comms)
+            if cur.get("running"):
+                return {
+                    "ok": True,
+                    "already": True,
+                    "running": True,
+                    "hashrate_display": cur.get("hashrate_display") or "measuring…",
+                    "backend": cur.get("backend"),
+                    "error": cur.get("error") or "",
+                }
+            local = start_local(comms)
             return {
-                "ok": ok,
-                "wallet": wallet,
-                "local": local,
-                "mesh": mesh,
-                "note": "Pool credits the configured/default wallet",
+                "ok": bool(local.get("ok")),
+                "running": bool(local.get("running")),
+                "hashrate_display": local.get("hashrate_display") or "measuring…",
+                "backend": local.get("backend"),
+                "wallet": local.get("wallet"),
+                "pool": local.get("pool"),
+                "error": local.get("error") or "",
             }
         except Exception as e:
             logger.exception("start")
@@ -56,38 +70,41 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
             from dashboard.local_miner import stop_local
 
             local = stop_local(get_comms())
-            mesh = {"ok": False}
-            try:
-                get_comms().broadcast_to_workers({"action": "pause"})
-                mesh = {"ok": True, "action": "pause", "target": "all_workers"}
-            except Exception as e:
-                mesh = {"ok": False, "error": str(e)}
-            return {"ok": True, "local": local, "mesh": mesh}
+            return {
+                "ok": True,
+                "running": False,
+                "hashrate_display": "idle",
+                "backend": local.get("backend"),
+            }
         except Exception as e:
+            logger.exception("stop")
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.post("/mining/engine/command")
     async def mining_engine_command(
         action: str = Form(...),
-        factor: str = Form(""),
         target: str = Form(""),
+        intensity: str = Form(""),
     ):
-        action = (action or "").strip()
+        action = (action or "").strip().lower()
         if action not in ("pause", "resume", "restart_miner", "adjust_intensity"):
-            return JSONResponse({"ok": False, "error": "unsupported action"}, status_code=400)
-        payload = {"action": action}
-        if action == "adjust_intensity":
-            if not factor:
-                return JSONResponse({"ok": False, "error": "factor required"}, status_code=400)
-            payload["factor"] = factor
+            return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
         try:
+            from dashboard.local_miner import get_local_engine, start_local, stop_local
+
             comms = get_comms()
-            if target.strip():
-                comms.send_to_node(target.strip(), payload)
-            else:
-                comms.broadcast_to_workers(payload)
-            return {"ok": True, "action": action, "target": target.strip() or "all_workers"}
+            if action == "pause":
+                stop_local(comms)
+            elif action == "resume":
+                start_local(comms)
+            elif action == "restart_miner":
+                stop_local(comms)
+                start_local(comms)
+            elif action == "adjust_intensity" and intensity:
+                eng = get_local_engine(comms)
+                eng.set_intensity(intensity)
+            return {"ok": True, "action": action}
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-    logger.info("mining_engine_ops mounted (start/stop, default wallet)")
+    logger.info("mining_engine_ops mounted (stable)")

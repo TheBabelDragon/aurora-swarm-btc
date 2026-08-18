@@ -1,4 +1,4 @@
-"""MiningEngine — samples hashrate directly from backend every loop."""
+"""MiningEngine — idempotent start, backoff restart, direct hashrate samples."""
 
 from __future__ import annotations
 
@@ -49,58 +49,66 @@ class MiningEngine:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_sample = 0.0
+        self._start_lock = threading.Lock()
+        self._restart_backoff = 2.0
+        self._last_restart_attempt = 0.0
 
     def _publish_hs(self, hs: float):
         if hs < 0:
             hs = 0.0
+        running = False
+        try:
+            running = bool(self.backend.running()) and not self.paused
+        except Exception:
+            pass
         self.pipeline.last_hashrate_hs = hs
         self.pipeline.last_hashrate_ghs = hs / 1e9
-        self.pipeline.last_hashrate_display = format_hashrate(hs)
+        self.pipeline.last_hashrate_display = format_hashrate(hs, running=running)
         self._on_hashrate(hs / 1e9)
         try:
             payload = {
                 "hashrate_hs": hs,
                 "hashrate_ghs": hs / 1e9,
-                "hashrate_display": format_hashrate(hs),
-                "ts": time.time(),
-                "status": "mining" if self.backend.running() else "stopped",
+                "hashrate_display": format_hashrate(hs, running=running),
+                "running": running,
+                "status": "mining" if running else "stopped",
+                "backend": getattr(self.backend, "kind", ""),
+                "error": getattr(self.backend, "last_error", "") or "",
             }
             self.comms.set_state(f"worker:{self.worker_id}:hashrate", payload, expire=120)
             self.comms.set_state("cluster:total_hashrate_hs", hs)
-            self.comms.set_state("cluster:total_hashrate_ghs", hs / 1e9)
-            self.comms.set_state("cluster:total_hashrate_btc", hs / 1e12)
         except Exception:
             pass
 
     def _on_hashrate(self, gh: float):
-        self.adaptive.observe(gh)
-        self.coord.publish_worker(
-            self.worker_id,
-            {
-                **self.pipeline.snapshot(),
-                "intensity": self.cfg.intensity,
-                "paused": self.paused,
-                "running": self.backend.running(),
-                "pool": self.cfg.pool_url,
-                "wallet": self.cfg.wallet,
-                "backend": getattr(self.backend, "kind", "unknown"),
-                "coin": self.cfg.coin,
-            },
-        )
+        pass
 
     def start(self) -> bool:
-        self.paused = False
-        ok = self.backend.start()
-        if ok and (self._thread is None or not self._thread.is_alive()):
+        """Idempotent — never stack duplicate worker threads."""
+        with self._start_lock:
+            self.paused = False
             self._stop.clear()
-            self._thread = threading.Thread(target=self._loop, name="mining-engine", daemon=True)
-            self._thread.start()
-        return ok
+            try:
+                if self.backend.running():
+                    ok = True
+                else:
+                    ok = bool(self.backend.start())
+            except Exception as e:
+                logger.warning(f"backend start: {e}")
+                ok = False
+            if ok and (self._thread is None or not self._thread.is_alive()):
+                self._thread = threading.Thread(target=self._loop, name="mining-engine", daemon=True)
+                self._thread.start()
+            self._restart_backoff = 2.0
+            return ok
 
     def stop(self):
         self.paused = True
         self._stop.set()
-        self.backend.stop()
+        try:
+            self.backend.stop()
+        except Exception as e:
+            logger.debug(f"backend stop: {e}")
         self._publish_hs(0.0)
 
     def restart(self):
@@ -111,13 +119,16 @@ class MiningEngine:
 
     def set_intensity(self, intensity: str):
         self.cfg.intensity = str(intensity)
-        self.backend.set_intensity(str(intensity))
+        try:
+            self.backend.set_intensity(str(intensity))
+        except Exception:
+            pass
 
     def status(self) -> dict:
         hs = 0.0
         if hasattr(self.backend, "get_hashrate_hs"):
             try:
-                hs = float(self.backend.get_hashrate_hs())
+                hs = float(self.backend.get_hashrate_hs() or 0)
             except Exception:
                 hs = self.pipeline.last_hashrate_hs
         else:
@@ -128,22 +139,30 @@ class MiningEngine:
                 err = self.backend.last_error() or ""
             except Exception:
                 pass
+        try:
+            running = bool(self.backend.running()) and not self.paused
+        except Exception:
+            running = False
         return {
             "worker_id": self.worker_id,
-            "running": self.backend.running(),
+            "running": running,
             "paused": self.paused,
             "intensity": self.cfg.intensity,
             "pool": self.cfg.pool_url,
             "wallet": self.cfg.wallet,
             "coin": self.cfg.coin,
             "backend": getattr(self.backend, "kind", "unknown"),
-            "backend_available": self.backend.available(),
+            "backend_available": True,
             "hashrate_hs": hs,
             "hashrate_ghs": hs / 1e9,
-            "hashrate_display": format_hashrate(hs),
+            "hashrate_display": format_hashrate(hs, running=running),
             "error": err,
-            **{k: v for k, v in self.pipeline.snapshot().items() if k not in ("hashrate_hs", "hashrate_ghs", "hashrate_display")},
-            "fleet": self.coord.fleet_view(),
+            **{
+                k: v
+                for k, v in self.pipeline.snapshot().items()
+                if k not in ("hashrate_hs", "hashrate_ghs", "hashrate_display")
+            },
+            "fleet": self.coord.fleet_view() if hasattr(self.coord, "fleet_view") else {},
         }
 
     def _loop(self):
@@ -151,44 +170,45 @@ class MiningEngine:
             if self.paused:
                 time.sleep(0.5)
                 continue
-            if not self.backend.running():
-                self.backend.start()
-                time.sleep(2)
-                continue
+            try:
+                if not self.backend.running():
+                    now = time.time()
+                    if now - self._last_restart_attempt >= self._restart_backoff:
+                        self._last_restart_attempt = now
+                        logger.info(
+                            "backend not running — restart (backoff=%.1fs)", self._restart_backoff
+                        )
+                        try:
+                            self.backend.start()
+                        except Exception as e:
+                            logger.warning(f"restart failed: {e}")
+                        self._restart_backoff = min(60.0, self._restart_backoff * 1.5)
+                    time.sleep(1.0)
+                    continue
+                # healthy path resets backoff slowly
+                self._restart_backoff = max(2.0, self._restart_backoff * 0.9)
 
-            # Drain stdout for share/job log lines
-            stream = self.backend.stdout()
-            if stream:
-                try:
-                    line = stream.readline()
-                    if line:
-                        self.pipeline.handle_line(line)
-                except Exception:
-                    pass
-
-            # Direct hashrate sample — source of truth
-            now = time.time()
-            if now - self._last_sample >= 1.5:
-                self._last_sample = now
-                hs = 0.0
-                if hasattr(self.backend, "get_hashrate_hs"):
+                stream = self.backend.stdout() if hasattr(self.backend, "stdout") else None
+                if stream:
                     try:
-                        hs = float(self.backend.get_hashrate_hs() or 0)
+                        line = stream.readline()
+                        if line:
+                            self.pipeline.handle_line(line if isinstance(line, str) else line.decode(errors="ignore"))
                     except Exception:
-                        hs = 0.0
-                if hs <= 0 and self.pipeline.last_hashrate_hs > 0:
-                    hs = self.pipeline.last_hashrate_hs
-                self._publish_hs(hs)
-                try:
-                    self.comms.heartbeat(
-                        metadata={
-                            "status": "mining",
-                            "hashrate_hs": hs,
-                            "hashrate_display": format_hashrate(hs),
-                            "backend": getattr(self.backend, "kind", ""),
-                        }
-                    )
-                except Exception:
-                    pass
+                        pass
 
+                now = time.time()
+                if now - self._last_sample >= 1.5:
+                    self._last_sample = now
+                    hs = 0.0
+                    if hasattr(self.backend, "get_hashrate_hs"):
+                        try:
+                            hs = float(self.backend.get_hashrate_hs() or 0)
+                        except Exception:
+                            hs = 0.0
+                    if hs <= 0 and self.pipeline.last_hashrate_hs > 0:
+                        hs = self.pipeline.last_hashrate_hs
+                    self._publish_hs(hs)
+            except Exception as e:
+                logger.debug(f"engine loop: {e}")
             time.sleep(0.05)
