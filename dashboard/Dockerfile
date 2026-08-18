@@ -15,6 +15,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-# Use dashboard.dashboard:app — proven to load (bvl/btc mount in logs).
-# Identity + BVL routes come from btc_ops / bvl_ops at module import.
-CMD ["python", "-m", "uvicorn", "dashboard.dashboard:app", "--host", "0.0.0.0", "--port", "8000"]
+# run.py mounts ops + replaces /torrent/status with truthful reporting
+CMD ["python", "-m", "uvicorn", "dashboard.run:app", "--host", "0.0.0.0", "--port", "8000"]
