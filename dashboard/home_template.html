@@ -48,6 +48,13 @@ a{color:#0f0}
 </div>
 </div>
 
+<div class="card"><h2>System check (no terminal)</h2>
+<p class="muted">Runs automatically on load. Green = live. No curl needed.</p>
+<button type="button" onclick="runSelftest()">Run self-test now</button>
+<button type="button" onclick="registerIdentity()">Register identity</button>
+<div id="selftest_box" class="muted" style="margin-top:10px">Waiting…</div>
+</div>
+
 <div class="card"><h2>Swarm Status (live global)</h2>
 <div id="status">…</div>
 <div id="global_stats" class="muted" style="margin-top:8px"></div>
@@ -173,11 +180,39 @@ async function uploadTorrent(){var f=document.getElementById('torrent_file').fil
 var data=await fetch('/torrent/upload',{method:'POST',body:fd}).then(function(r){return r.json();});showT(data.status==='ok'?'Seeded':'fail',data.status==='ok');}
 async function ensureAsset(){var ih=document.getElementById('ensure_infohash').value.trim();var fd=new FormData();fd.append('infohash',ih);await fetch('/torrent/ensure',{method:'POST',body:fd});}
 async function processBroadcasts(){await fetch('/torrent/process_broadcasts',{method:'POST'});}
-async function registerIdentity(){var d=await fetch('/btc/identity/register',{method:'POST'}).then(function(r){return r.json();});showT(d.status==='ok'?'Identity registered':'identity fail',d.status==='ok');refresh();}
+
+async function registerIdentity(){
+var d=await fetch('/btc/identity/register',{method:'POST'}).then(function(r){return r.json();});
+if(!(d.status==='ok')){d=await fetch('/btc/identity/register_safe',{method:'POST'}).then(function(r){return r.json();});}
+var msg=d.status==='ok'?('Identity '+(d.identity&&d.identity.fingerprint||'ok')):(d.detail||d.error||'identity fail');
+showT(msg,d.status==='ok');
+var box=document.getElementById('selftest_box');
+if(box&&d.status==='ok'){box.innerHTML='<span class="success">Identity ready · '+(d.identity&&d.identity.fingerprint||'')+'</span>';}
+refresh();
+}
+async function runSelftest(){
+var box=document.getElementById('selftest_box');
+if(box) box.textContent='Running…';
+try{
+var d=await fetch('/ops/selftest').then(function(r){return r.json();});
+var h=(d.ok?'<p class="success"><strong>All systems go</strong></p>':'<p class="error"><strong>Some checks failed</strong></p>');
+(d.results||[]).forEach(function(r){
+h+='<div>'+(r.ok?'✓':'✗')+' <span class="mono">'+r.name+'</span> · '+(typeof r.detail==='object'?JSON.stringify(r.detail).slice(0,120):String(r.detail||'')).replace(/</g,'')+'</div>';
+});
+if(box) box.innerHTML=h;
+}catch(e){if(box) box.innerHTML='<span class="error">selftest unavailable — rebuild dashboard</span>';}
+}
+async function autoBootstrap(){
+try{await fetch('/comms/register',{method:'POST'});}catch(e){}
+try{await registerIdentity();}catch(e){}
+try{await runSelftest();}catch(e){}
+}
+
 async function sendBroadcast(action){var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
 var data=await fetch('/command/broadcast',{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.action;}
 async function sendToNode(action){var id=document.getElementById('target_node').value.trim();if(!id)return;var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
 var data=await fetch('/command/to_node/'+id,{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.target;}
+autoBootstrap();
 refresh();setInterval(refresh,4000);
 </script>
 </body></html>
