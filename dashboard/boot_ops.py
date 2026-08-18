@@ -1,4 +1,4 @@
-"""Mount ops + live status + mining + auto-mine + html fix + BVL."""
+"""Mount ops + live status + mining + auto-mine + mesh heartbeat + BVL."""
 from __future__ import annotations
 
 import logging
@@ -107,5 +107,12 @@ def boot(
         start_auto_mine(get_comms)
     except Exception as e:
         logger.warning(f"auto_mine: {e}")
+
+    try:
+        from dashboard.mesh_heartbeat import start_mesh_heartbeat
+
+        start_mesh_heartbeat(get_comms)
+    except Exception as e:
+        logger.warning(f"mesh_heartbeat: {e}")
 
     app.state.aurora_booted = True

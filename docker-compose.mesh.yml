@@ -1,0 +1,43 @@
+# Multi-machine mesh: BOTH must share REDIS_URL
+# Hub: docker compose -f docker-compose.mesh.yml --profile hub up -d --build
+# Peer: REDIS_URL=redis://HUB_IP:6379/0 docker compose -f docker-compose.mesh.yml up -d --build
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aurora-redis
+    profiles: ["hub"]
+    command: ["redis-server", "--bind", "0.0.0.0", "--protected-mode", "no"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    network_mode: host
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: aurora-dashboard
+    network_mode: host
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://127.0.0.1:6379/0}
+      - PYTHONUNBUFFERED=1
+      - AURORA_NODE_ID=${AURORA_NODE_ID:-}
+      - WORKER_NAME=${WORKER_NAME:-}
+      - AURORA_AUTO_MINE=${AURORA_AUTO_MINE:-1}
+      - AURORA_MINER_BACKEND=${AURORA_MINER_BACKEND:-cpu}
+      - AURORA_CPU_THREADS=${AURORA_CPU_THREADS:-0}
+      - MINING_WALLET=${MINING_WALLET:-bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g}
+      - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
+      - INTENSITY=${INTENSITY:-22}
+    restart: unless-stopped
+
+volumes:
+  redis_data:
