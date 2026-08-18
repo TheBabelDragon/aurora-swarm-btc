@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html><head><title>Aurora Swarm — Comms Operations Center</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0a0a0a;color:#0f0;margin:40px}
+h1,h2{color:#0f0;margin-top:0}
+.card{background:#111;border:1px solid #0f0;padding:20px;margin:20px 0;border-radius:8px}
+pre{background:#000;padding:15px;overflow-x:auto;font-size:.85em}
+.metric{font-size:2em;font-weight:bold}
+button{background:#003300;color:#0f0;border:1px solid #0f0;padding:7px 14px;margin:3px;cursor:pointer;border-radius:4px}
+button.small{padding:4px 8px;font-size:.85em}
+input{background:#000;color:#0f0;border:1px solid #0f0;padding:6px;margin:2px;border-radius:4px}
+.muted{color:#6a6}.mono{font-family:ui-monospace,monospace}.success{color:#0f0}.error{color:#f66}
+table{width:100%;border-collapse:collapse}td,th{border:1px solid #0f0;padding:6px;text-align:left}
+a{color:#0f0}
+</style></head><body>
+<h1>Aurora Swarm — Comms Operations Center</h1>
+<div class="card" id="comms_panel">
+<h2>Comms Layer</h2>
+<div id="comms_card" class="muted">Connecting…</div>
+<div class="section" style="margin-top:8px">
+<button type="button" onclick="commsRegister()">Register on mesh</button>
+<button type="button" onclick="commsExport()">Export join pack</button>
+<a href="/comms/export.env" download="aurora-mesh.env"><button type="button">Download .env</button></a>
+<a href="/comms/export.sh" download="join-aurora-mesh.sh"><button type="button">Download join.sh</button></a>
+</div>
+<pre id="comms_export" class="mono muted" style="max-height:100px;overflow:auto;margin-top:8px;white-space:pre-wrap"></pre>
+<div id="comms_result" style="min-height:18px;margin-top:6px"></div>
+<h2 style="margin-top:18px">Mesh Chat</h2>
+<div style="display:flex;gap:12px;flex-wrap:wrap">
+<div style="min-width:180px;flex:0 0 200px">
+<input id="chat_search" placeholder="Search users…" style="width:100%;margin-bottom:6px" oninput="refreshChatUsers()">
+<div id="chat_users" class="muted" style="max-height:220px;overflow:auto;border:1px solid #0f0;border-radius:6px;padding:6px">Loading…</div>
+<div style="margin-top:8px">
+<input id="chat_external" placeholder="External node id" style="width:100%;margin-bottom:4px">
+<button type="button" class="small" onclick="chatAddExternal()">Add / open</button>
+</div>
+</div>
+<div style="flex:1;min-width:240px">
+<div id="chat_title" class="muted" style="margin-bottom:4px">#swarm</div>
+<div id="chat_log" style="min-height:200px;max-height:280px;overflow:auto;border:1px solid #0f0;border-radius:6px;padding:8px;background:#0b0b0b"></div>
+<div style="margin-top:8px;display:flex;gap:6px">
+<input id="chat_text" placeholder="Message…" style="flex:1">
+<button type="button" onclick="chatSend()">Send</button>
+</div>
+</div>
+</div>
+<p class="muted">Shared REDIS_URL required for multi-node chat.</p>
+</div>
+<div class="card"><h2>Swarm Status</h2><div id="status">…</div>
+<div id="btc_status" class="muted" style="margin-top:8px"></div>
+<div id="bvl_status" class="muted" style="margin-top:6px"></div></div>
+<div class="card"><h2>Asset Transfer Manager</h2>
+<input type="file" id="torrent_file">
+<button type="button" onclick="uploadTorrent()">Upload and seed</button>
+<input id="ensure_infohash" placeholder="infohash">
+<button type="button" onclick="ensureAsset()">Ensure</button>
+<button type="button" onclick="processBroadcasts()">Process queue</button>
+<button type="button" onclick="registerIdentity()">Register identity</button>
+<div id="torrent_msg"></div>
+<div id="torrent_summary" class="muted"></div>
+</div>
+<div class="card"><h2>Nodes</h2><pre id="nodes"></pre></div>
+<div class="card"><h2>Events</h2><pre id="events"></pre></div>
+<div class="card"><h2>Commands</h2>
+<input id="target_node" placeholder="node id">
+<button type="button" onclick="sendBroadcast('pause')">Pause all</button>
+<button type="button" onclick="sendBroadcast('resume')">Resume all</button>
+<button type="button" onclick="sendToNode('pause')">Pause node</button>
+<button type="button" onclick="sendToNode('resume')">Resume node</button>
+<div id="command_result" class="muted"></div>
+</div>
+<script src="/ux/comms.js"></script>
+<script>
+document.getElementById('chat_text').addEventListener('keydown',function(e){if(e.key==='Enter')chatSend();});
+function showT(m,ok){var e=document.getElementById('torrent_msg');if(e){e.textContent=m;e.className=ok?'success':'error';}}
+async function refresh(){try{
+var s=await fetch('/status').then(function(r){return r.json();});
+var rate=s.hashrate_display||(s.mining&&s.mining.hashrate_display)||'0 H/s';
+document.getElementById('status').innerHTML='<div class="metric">'+(s.active_workers||0)+' workers</div><p>Entropy '+s.entropy+' · '+rate+' · '+(s.mood||'')+'</p>';
+try{var v=await fetch('/bvl/status').then(function(r){return r.json();});document.getElementById('bvl_status').textContent='BVL bal='+(v.balance||0)+' supply='+(v.supply||0);}catch(e){}
+document.getElementById('nodes').innerText=JSON.stringify(await fetch('/nodes').then(function(r){return r.json();}),null,2);
+document.getElementById('events').innerText=JSON.stringify(await fetch('/events?limit=8').then(function(r){return r.json();}),null,2);
+}catch(e){console.error(e);}}
+async function uploadTorrent(){var f=document.getElementById('torrent_file').files[0];if(!f)return;var fd=new FormData();fd.append('file',f);
+var data=await fetch('/torrent/upload',{method:'POST',body:fd}).then(function(r){return r.json();});showT(data.status==='ok'?'Seeded':'fail',data.status==='ok');}
+async function ensureAsset(){var ih=document.getElementById('ensure_infohash').value.trim();var fd=new FormData();fd.append('infohash',ih);await fetch('/torrent/ensure',{method:'POST',body:fd});}
+async function processBroadcasts(){await fetch('/torrent/process_broadcasts',{method:'POST'});}
+async function registerIdentity(){await fetch('/btc/identity/register',{method:'POST'});}
+async function sendBroadcast(action){var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
+var data=await fetch('/command/broadcast',{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.action;}
+async function sendToNode(action){var id=document.getElementById('target_node').value.trim();if(!id)return;var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
+var data=await fetch('/command/to_node/'+id,{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.target;}
+refresh();setInterval(refresh,4000);
+</script>
+</body></html>
