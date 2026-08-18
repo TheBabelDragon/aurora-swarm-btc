@@ -1,4 +1,4 @@
-# Solo: Redis + Dashboard — mining auto-starts (no curl)
+# Solo: Redis + Dashboard — mining auto-starts, full CPU by default
 services:
   redis:
     image: redis:7-alpine
@@ -31,10 +31,11 @@ services:
       - PYTHONUNBUFFERED=1
       - AURORA_NODE_ID=dashboard
       - AURORA_AUTO_MINE=1
-      - AURORA_MINER_BACKEND=${AURORA_MINER_BACKEND:-auto}
+      - AURORA_MINER_BACKEND=${AURORA_MINER_BACKEND:-cpu}
+      - AURORA_CPU_THREADS=${AURORA_CPU_THREADS:-0}
       - MINING_WALLET=${MINING_WALLET:-bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g}
       - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
-      - INTENSITY=${INTENSITY:-19}
+      - INTENSITY=${INTENSITY:-22}
       - GPUS_PER_POD=${GPUS_PER_POD:-1}
       - BFGMINER_BIN=${BFGMINER_BIN:-/host-bin/bfgminer}
       - WORKER_NAME=${WORKER_NAME:-dashboard}
@@ -43,6 +44,7 @@ services:
     restart: unless-stopped
     networks:
       - aurora-net
+    # Note: Docker may limit CPUs — remove cpuset limits if present
 
 networks:
   aurora-net:
