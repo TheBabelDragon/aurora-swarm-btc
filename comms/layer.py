@@ -1,11 +1,15 @@
-import os
+"""Aurora CommsLayer — Redis-backed mesh bus."""
+
+from __future__ import annotations
+
 import json
-import time
 import logging
-from typing import Any, Callable, Dict, List, Optional, Set
-from pydantic import BaseModel, Field
+import os
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 import redis
+from pydantic import BaseModel, Field
 
 from .node_id import default_node_id
 
@@ -13,46 +17,73 @@ logger = logging.getLogger("aurora.comms")
 
 
 class SwarmMessage(BaseModel):
-    """Base message model for structured swarm communication."""
-    type: str = Field(..., description="Message type e.g. event, command, telemetry, context")
-    payload: Dict[str, Any] = Field(default_factory=dict)
-    timestamp: float = Field(default_factory=time.time)
-    source: Optional[str] = Field(None, description="Source node or component ID")
-    target: Optional[str] = Field(None, description="Optional specific target node")
-    correlation_id: Optional[str] = None
+    type: str
+    payload: Any = None
+    source: Optional[str] = None
+    target: Optional[str] = None
+    ts: float = Field(default_factory=time.time)
 
 
 class CommsLayer:
-    """
-    High-level Communications Layer for the Aurora Swarm (Hybrid Node Model).
-
-    All peers must share the same REDIS_URL to appear as one collective.
-    """
-
     EVENT_HISTORY_KEY = "events:history"
-    MAX_EVENTS = 100
-    CORE_NODE_TYPES = {"worker", "coordinator", "sensing", "interface", "gateway", "dashboard"}
+    MAX_EVENTS = 200
     NODE_TTL = 180
 
     def __init__(self, redis_url: Optional[str] = None, node_id: Optional[str] = None):
-        self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
+        # Prefer host-local Redis for docker host-network solo; override via REDIS_URL / mesh join
+        default = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+        if default.startswith("redis://redis:"):
+            default = "redis://127.0.0.1:6379/0"
+        self.redis_url = redis_url or default
         self.node_id = node_id or default_node_id("node")
         self.r = redis.from_url(
             self.redis_url,
             decode_responses=True,
-            socket_connect_timeout=2.0,
-            socket_timeout=5.0,
+            socket_connect_timeout=3,
+            socket_timeout=5,
             retry_on_timeout=True,
-            health_check_interval=30,
         )
+        self.pubsub = None
+        self.handlers: Dict[str, List[Callable[[SwarmMessage], None]]] = {}
+        self._subscribed_patterns: List[str] = []
         try:
-            self.pubsub = self.r.pubsub()
+            self.pubsub = self.r.pubsub(ignore_subscribe_messages=True)
         except Exception as e:
             logger.warning(f"pubsub deferred: {e}")
             self.pubsub = None
-        self.handlers: Dict[str, List[Callable[[SwarmMessage], None]]] = {}
-        self._subscribed_patterns: List[str] = []
         logger.info(f"CommsLayer initialized for node={self.node_id} url={self.redis_url}")
+
+    def reconnect(self, redis_url: str) -> bool:
+        """Point this process at a different Redis (LAN mesh leader)."""
+        redis_url = (redis_url or "").strip()
+        if not redis_url:
+            return False
+        try:
+            client = redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=5,
+                retry_on_timeout=True,
+            )
+            if not client.ping():
+                return False
+            old = self.r
+            self.r = client
+            self.redis_url = redis_url
+            try:
+                self.pubsub = self.r.pubsub(ignore_subscribe_messages=True)
+            except Exception:
+                self.pubsub = None
+            try:
+                old.close()
+            except Exception:
+                pass
+            logger.info(f"CommsLayer reconnected node={self.node_id} url={redis_url}")
+            return True
+        except Exception as e:
+            logger.warning(f"reconnect failed: {e}")
+            return False
 
     def ping(self) -> bool:
         try:
@@ -149,7 +180,6 @@ class CommsLayer:
             logger.debug(f"heartbeat: {e}")
 
     def get_active_nodes(self, node_type: Optional[str] = None, max_age: float = 120.0) -> List[Dict]:
-        """Peers on the *same* REDIS_URL only. Stale IDs are pruned."""
         out: List[Dict] = []
         now = time.time()
         try:
@@ -178,35 +208,40 @@ class CommsLayer:
             logger.debug(f"get_active_nodes: {e}")
         return out
 
-    def get_nodes_by_capability(self, capability: str) -> List[Dict]:
+    def get_nodes_with_capability(self, capability: str) -> List[Dict]:
         return [n for n in self.get_active_nodes() if capability in (n.get("capabilities") or [])]
 
     def get_workers(self) -> List[Dict]:
         return [
             n
             for n in self.get_active_nodes()
-            if n.get("node_type") in ("worker", "dashboard")
-            or "worker" in (n.get("capabilities") or [])
-            or "dashboard" in (n.get("capabilities") or [])
-            or "gpu_mining" in (n.get("capabilities") or [])
+            if n.get("node_type") in ("worker", "dashboard", None)
             or "mining_engine" in (n.get("capabilities") or [])
+            or "dashboard" in (n.get("capabilities") or [])
         ]
 
     def send_to_node(self, target_node_id: str, message: Any):
-        if isinstance(message, dict) and "type" not in message:
-            message = SwarmMessage(type="command", payload=message, source=self.node_id, target=target_node_id)
-        elif isinstance(message, dict):
-            message = SwarmMessage(**{**message, "source": message.get("source") or self.node_id, "target": target_node_id})
+        if not isinstance(message, SwarmMessage):
+            if isinstance(message, dict):
+                message = SwarmMessage(
+                    type="command",
+                    payload=message,
+                    source=self.node_id,
+                    target=target_node_id,
+                )
+            else:
+                message = SwarmMessage(type="command", payload=message, source=self.node_id, target=target_node_id)
         self.publish_message(f"command.node.{target_node_id}", message)
 
     def broadcast_to_workers(self, message: Any):
-        if isinstance(message, dict):
+        if not isinstance(message, SwarmMessage):
             message = SwarmMessage(type="command", payload=message, source=self.node_id)
         self.publish_message("command.workers", message)
-
-    def broadcast_to_capability(self, capability: str, message: Any):
-        for n in self.get_nodes_by_capability(capability):
-            self.send_to_node(n.get("node_id"), message)
+        for n in self.get_active_nodes():
+            try:
+                self.send_to_node(n.get("node_id"), message)
+            except Exception:
+                pass
 
     def publish_event(self, event_type: str, data: Dict[str, Any], source: Optional[str] = None):
         msg = SwarmMessage(type=f"event.{event_type}", payload=data, source=source or self.node_id)
@@ -216,82 +251,18 @@ class CommsLayer:
         msg = SwarmMessage(type="telemetry", payload=metrics, source=source or self.node_id)
         self.publish_message("telemetry", msg)
 
-    def send_command(self, action: str, payload: Dict[str, Any] = None, target: Optional[str] = None):
-        body = {"action": action, **(payload or {})}
-        msg = SwarmMessage(type="command", payload=body, source=self.node_id, target=target)
-        if target:
-            self.publish_message(f"command.node.{target}", msg)
-        else:
-            self.publish_message("command.workers", msg)
-
-    def send_sensing_command(self, action: str, **kwargs):
-        self.publish_message(
-            "command.sensing",
-            SwarmMessage(type="command", payload={"action": action, **kwargs}, source=self.node_id),
-        )
-
     def subscribe(self, pattern: str, handler: Callable[[SwarmMessage], None]):
-        if pattern not in self.handlers:
-            self.handlers[pattern] = []
-        self.handlers[pattern].append(handler)
+        self.handlers.setdefault(pattern, []).append(handler)
         if pattern not in self._subscribed_patterns:
             self._subscribed_patterns.append(pattern)
             try:
-                if self.pubsub is None:
-                    self.pubsub = self.r.pubsub()
-                self.pubsub.psubscribe(f"aurora:{pattern}")
+                if self.pubsub:
+                    self.pubsub.psubscribe(f"aurora:{pattern}")
             except Exception as e:
                 logger.warning(f"subscribe failed: {e}")
 
     def start_listener(self, patterns: Optional[List[str]] = None):
-        import threading
-
         if patterns:
             for p in patterns:
                 if p not in self._subscribed_patterns:
-                    self.subscribe(p, lambda msg: None)
-
-        def _loop():
-            if self.pubsub is None:
-                try:
-                    self.pubsub = self.r.pubsub()
-                    for p in self._subscribed_patterns:
-                        self.pubsub.psubscribe(f"aurora:{p}")
-                except Exception as e:
-                    logger.warning(f"listener pubsub failed: {e}")
-                    return
-            try:
-                for item in self.pubsub.listen():
-                    if item is None or item.get("type") not in ("message", "pmessage"):
-                        continue
-                    data = item.get("data")
-                    try:
-                        raw = json.loads(data) if isinstance(data, str) else data
-                        msg = SwarmMessage(**raw) if isinstance(raw, dict) else None
-                    except Exception:
-                        continue
-                    if not msg:
-                        continue
-                    for pattern, handlers in list(self.handlers.items()):
-                        for h in handlers:
-                            try:
-                                h(msg)
-                            except Exception as e:
-                                logger.debug(f"handler error: {e}")
-            except Exception as e:
-                logger.warning(f"listener stopped: {e}")
-
-        t = threading.Thread(target=_loop, name="comms-listener", daemon=True)
-        t.start()
-        return t
-
-    def close(self):
-        try:
-            if self.pubsub:
-                self.pubsub.close()
-        except Exception:
-            pass
-        try:
-            self.r.close()
-        except Exception:
-            pass
+                    self.subscribe(p, lambda m: None)
