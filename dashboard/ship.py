@@ -6,9 +6,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aurora-dashboard.ship")
 
-# Import app (may log Redis warnings; must not exit)
 from dashboard.dashboard import (  # noqa: E402
     app,
+    bus,
     comms,
     get_anchor,
     get_fabric,
@@ -16,8 +16,23 @@ from dashboard.dashboard import (  # noqa: E402
     get_torrent_manager,
 )
 
-from fastapi import Form  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
+
+# Prefer full boot path
+try:
+    from dashboard.boot_ops import boot
+
+    boot(
+        app,
+        get_comms=lambda: comms,
+        get_torrent_manager=get_torrent_manager,
+        get_anchor=get_anchor,
+        get_identity=get_identity,
+        get_fabric=get_fabric,
+        bus=bus,
+    )
+except Exception as e:
+    logger.exception(f"boot_ops failed: {e}")
 
 mounted: list = []
 try:
@@ -30,9 +45,8 @@ try:
         get_anchor=get_anchor,
         get_identity=get_identity,
     ) or []
-    logger.info(f"ship mounted: {mounted}")
 except Exception as e:
-    logger.exception(f"mount_optional_ops failed (continuing with fallbacks): {e}")
+    logger.warning(f"mount_optional_ops: {e}")
 
 
 def _has(path: str, method: str = "POST") -> bool:
@@ -56,10 +70,7 @@ if not _has("/btc/identity/register", "POST"):
             ident.register_with_identity(capabilities=["dashboard", "btc_identity"])
             return {"status": "ok", "identity": ident.identity_view()}
         except Exception as e:
-            logger.exception("identity register")
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
-
-    logger.info("fallback route /btc/identity/register")
 
 if not _has("/btc/status", "GET"):
 
@@ -80,22 +91,18 @@ if not _has("/btc/status", "GET"):
             "anchor_ready": get_anchor() is not None,
         }
 
+# Open mint removed — explicit 410 if something still calls it
 if not _has("/bvl/reward_seed", "POST"):
 
     @app.post("/bvl/reward_seed")
-    async def _ship_bvl_reward_seed(
-        asset_id: str = Form(""),
-        node_id: str = Form(None),
-    ):
-        try:
-            from mods.bvl.ledger_service import BabelLedger
-
-            bvl = BabelLedger(comms)
-            nid = (node_id or "").strip() or comms.node_id
-            return bvl.reward_seed(nid, asset_id=(asset_id or "").strip() or "genesis")
-        except Exception as e:
-            logger.exception("bvl reward_seed")
-            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+    async def _ship_bvl_reward_seed_blocked():
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "open mint disabled — BVL is earned via EconomyReactor (asset.complete / anchored)",
+            },
+            status_code=410,
+        )
 
 if not _has("/bvl/status", "GET"):
 
@@ -109,7 +116,6 @@ if not _has("/bvl/status", "GET"):
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
-# Always-on health (even if redis is unhappy)
 @app.get("/healthz")
 def _ship_healthz():
     redis_ok = False
@@ -125,7 +131,7 @@ def _ship_healthz():
     }
 
 
-logger.info("ship ready — uvicorn will serve dashboard.ship:app")
+logger.info("ship ready")
 
 if __name__ == "__main__":
     import uvicorn
