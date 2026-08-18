@@ -1,0 +1,7 @@
+{
+  "name": "mining_provenance",
+  "version": "0.1.0",
+  "description": "Progressive mining evidence: shares → pool credit → optional coinbase association. Bitcoin facts vs Aurora observations.",
+  "entrypoint": "entrypoint.py",
+  "capabilities": ["mining_provenance", "mining_events"]
+}
