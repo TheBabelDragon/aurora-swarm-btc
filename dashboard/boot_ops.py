@@ -1,4 +1,4 @@
-"""Mount ops + comms panel + mining + mesh + BVL."""
+"""Mount ops + comms + node command center + mining + mesh."""
 from __future__ import annotations
 
 import logging
@@ -47,6 +47,13 @@ def boot(
         install_comms_ops(app, get_comms=get_comms)
     except Exception as e:
         logger.warning(f"comms_ops: {e}")
+
+    try:
+        from dashboard.node_ops import install_node_ops
+
+        install_node_ops(app, get_comms=get_comms, get_identity=get_identity)
+    except Exception as e:
+        logger.warning(f"node_ops: {e}")
 
     try:
         from dashboard.truth_routes import install_truth_routes
@@ -109,5 +116,16 @@ def boot(
         start_mesh_heartbeat(get_comms)
     except Exception as e:
         logger.warning(f"mesh_heartbeat: {e}")
+
+    # Persist hardware-associated identity on shared mesh
+    try:
+        if get_identity:
+            ident = get_identity()
+            if ident:
+                ident.register_with_identity(
+                    capabilities=["dashboard", "mesh", "mining_engine", "chat", "btc_identity"]
+                )
+    except Exception as e:
+        logger.warning(f"identity register: {e}")
 
     app.state.aurora_booted = True

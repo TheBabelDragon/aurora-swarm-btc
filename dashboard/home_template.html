@@ -8,12 +8,14 @@ pre{background:#000;padding:15px;overflow-x:auto;font-size:.85em}
 .metric{font-size:2em;font-weight:bold}
 button{background:#003300;color:#0f0;border:1px solid #0f0;padding:7px 14px;margin:3px;cursor:pointer;border-radius:4px}
 button.small{padding:4px 8px;font-size:.85em}
-input{background:#000;color:#0f0;border:1px solid #0f0;padding:6px;margin:2px;border-radius:4px}
+button.danger{background:#330000;border-color:#f66;color:#f88}
+input,select{background:#000;color:#0f0;border:1px solid #0f0;padding:6px;margin:2px;border-radius:4px}
 .muted{color:#6a6}.mono{font-family:ui-monospace,monospace}.success{color:#0f0}.error{color:#f66}
 table{width:100%;border-collapse:collapse}td,th{border:1px solid #0f0;padding:6px;text-align:left}
 a{color:#0f0}
 </style></head><body>
 <h1>Aurora Swarm — Comms Operations Center</h1>
+
 <div class="card" id="comms_panel">
 <h2>Comms Layer</h2>
 <div id="comms_card" class="muted">Connecting…</div>
@@ -44,11 +46,36 @@ a{color:#0f0}
 </div>
 </div>
 </div>
-<p class="muted">Shared REDIS_URL required for multi-node chat.</p>
 </div>
-<div class="card"><h2>Swarm Status</h2><div id="status">…</div>
+
+<div class="card"><h2>Swarm Status (live global)</h2>
+<div id="status">…</div>
+<div id="global_stats" class="muted" style="margin-top:8px"></div>
 <div id="btc_status" class="muted" style="margin-top:8px"></div>
-<div id="bvl_status" class="muted" style="margin-top:6px"></div></div>
+<div id="bvl_status" class="muted" style="margin-top:6px"></div>
+<div id="identity_status" class="muted" style="margin-top:6px"></div>
+</div>
+
+<div class="card"><h2>Node Command Center</h2>
+<p class="muted">Pick a mesh node, inspect live stats, send a targeted command.</p>
+<div class="section" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+<select id="ncc_node" style="min-width:220px" onchange="nccLoad()"><option value="">— select node —</option></select>
+<button type="button" class="small" onclick="nccRefreshNodes()">Refresh list</button>
+</div>
+<div id="ncc_detail" class="muted" style="margin:10px 0;min-height:40px">No node selected</div>
+<div class="section">
+<button type="button" onclick="nccCmd('pause')">Pause mining</button>
+<button type="button" onclick="nccCmd('resume')">Resume mining</button>
+<button type="button" onclick="nccCmd('status')">Request status</button>
+<button type="button" onclick="nccCmd('bvl_balance')">BVL balance</button>
+<input id="ncc_intensity" placeholder="intensity" style="width:90px">
+<button type="button" onclick="nccCmd('intensity')">Set intensity</button>
+<input id="ncc_msg" placeholder="DM message" style="min-width:160px">
+<button type="button" onclick="nccCmd('chat')">Send DM</button>
+</div>
+<div id="ncc_result" style="min-height:18px;margin-top:8px"></div>
+</div>
+
 <div class="card"><h2>Asset Transfer Manager</h2>
 <input type="file" id="torrent_file">
 <button type="button" onclick="uploadTorrent()">Upload and seed</button>
@@ -59,9 +86,10 @@ a{color:#0f0}
 <div id="torrent_msg"></div>
 <div id="torrent_summary" class="muted"></div>
 </div>
+
 <div class="card"><h2>Nodes</h2><pre id="nodes"></pre></div>
 <div class="card"><h2>Events</h2><pre id="events"></pre></div>
-<div class="card"><h2>Commands</h2>
+<div class="card"><h2>Fleet Commands</h2>
 <input id="target_node" placeholder="node id">
 <button type="button" onclick="sendBroadcast('pause')">Pause all</button>
 <button type="button" onclick="sendBroadcast('resume')">Resume all</button>
@@ -69,23 +97,83 @@ a{color:#0f0}
 <button type="button" onclick="sendToNode('resume')">Resume node</button>
 <div id="command_result" class="muted"></div>
 </div>
+
 <script src="/ux/comms.js"></script>
 <script>
 document.getElementById('chat_text').addEventListener('keydown',function(e){if(e.key==='Enter')chatSend();});
 function showT(m,ok){var e=document.getElementById('torrent_msg');if(e){e.textContent=m;e.className=ok?'success':'error';}}
+
 async function refresh(){try{
 var s=await fetch('/status').then(function(r){return r.json();});
 var rate=s.hashrate_display||(s.mining&&s.mining.hashrate_display)||'0 H/s';
 document.getElementById('status').innerHTML='<div class="metric">'+(s.active_workers||0)+' workers</div><p>Entropy '+s.entropy+' · '+rate+' · '+(s.mood||'')+'</p>';
-try{var v=await fetch('/bvl/status').then(function(r){return r.json();});document.getElementById('bvl_status').textContent='BVL bal='+(v.balance||0)+' supply='+(v.supply||0);}catch(e){}
+try{
+var g=await fetch('/comms/global').then(function(r){return r.json();});
+var b=g.bvl||{};
+var gs='Global compute <strong>'+(g.global_hashrate_display||'0 H/s')+'</strong> · peers <strong>'+(g.peer_count||0)+'</strong>';
+gs+=' · BVL supply <strong>'+(b.supply||0)+'</strong> · sum balances <strong>'+(b.balance_sum||0)+'</strong>';
+document.getElementById('global_stats').innerHTML=gs;
+document.getElementById('bvl_status').textContent='Local BVL bal='+(b.balance||0)+' · node='+(g.node_id||'');
+if(g.identity){
+document.getElementById('identity_status').textContent='Identity fp='+(g.identity.fingerprint||'')+' · '+(g.identity.address_style||'')+' · '+(g.identity.backend||'');
+}
+}catch(e){}
+try{var v=await fetch('/bvl/status').then(function(r){return r.json();});
+if(v.balances_global){document.getElementById('bvl_status').textContent='BVL local='+(v.balance||0)+' supply='+(v.supply||0)+' accounts='+Object.keys(v.balances_global).length;}
+}catch(e){}
 document.getElementById('nodes').innerText=JSON.stringify(await fetch('/nodes').then(function(r){return r.json();}),null,2);
 document.getElementById('events').innerText=JSON.stringify(await fetch('/events?limit=8').then(function(r){return r.json();}),null,2);
+nccRefreshNodes();
 }catch(e){console.error(e);}}
+
+async function nccRefreshNodes(){
+try{
+var d=await fetch('/comms/chat/users').then(function(r){return r.json();});
+var sel=document.getElementById('ncc_node');
+var cur=sel.value;
+sel.innerHTML='<option value="">— select node —</option>';
+(d.users||[]).forEach(function(u){
+if(u.source==='self')return;
+var o=document.createElement('option');
+o.value=u.node_id;o.textContent=(u.online?'● ':'○ ')+u.node_id+' ('+u.source+')';
+sel.appendChild(o);
+});
+if(cur)sel.value=cur;
+}catch(e){}}
+
+async function nccLoad(){
+var id=document.getElementById('ncc_node').value;
+if(!id){document.getElementById('ncc_detail').textContent='No node selected';return;}
+try{
+var d=await fetch('/comms/node/'+encodeURIComponent(id)).then(function(r){return r.json();});
+var h='<span class="mono">'+id+'</span> · '+(d.online?'online':'offline');
+h+=' · BVL '+d.bvl_balance;
+var hr=d.hashrate||{};
+if(hr.hashrate_display)h+=' · '+hr.hashrate_display;
+else if(hr.hashrate_hs)h+=' · '+hr.hashrate_hs+' H/s';
+if(d.identity&&d.identity.fingerprint)h+=' · fp '+d.identity.fingerprint;
+document.getElementById('ncc_detail').innerHTML=h;
+document.getElementById('target_node').value=id;
+}catch(e){document.getElementById('ncc_detail').textContent='load failed';}}
+
+async function nccCmd(action){
+var id=document.getElementById('ncc_node').value;
+if(!id){document.getElementById('ncc_result').textContent='Select a node first';document.getElementById('ncc_result').className='error';return;}
+var fd=new FormData();fd.append('action',action);
+if(action==='intensity'){fd.append('intensity',document.getElementById('ncc_intensity').value||'19');}
+if(action==='chat'){fd.append('message',document.getElementById('ncc_msg').value||'ping');}
+var d=await fetch('/comms/node/'+encodeURIComponent(id)+'/command',{method:'POST',body:fd}).then(function(r){return r.json();});
+var o=document.getElementById('ncc_result');
+o.textContent=d.ok?(action+' → '+id+(d.balance!=null?(' bal='+d.balance):'')):(d.error||'failed');
+o.className=d.ok?'success':'error';
+if(action==='bvl_balance')nccLoad();
+}
+
 async function uploadTorrent(){var f=document.getElementById('torrent_file').files[0];if(!f)return;var fd=new FormData();fd.append('file',f);
 var data=await fetch('/torrent/upload',{method:'POST',body:fd}).then(function(r){return r.json();});showT(data.status==='ok'?'Seeded':'fail',data.status==='ok');}
 async function ensureAsset(){var ih=document.getElementById('ensure_infohash').value.trim();var fd=new FormData();fd.append('infohash',ih);await fetch('/torrent/ensure',{method:'POST',body:fd});}
 async function processBroadcasts(){await fetch('/torrent/process_broadcasts',{method:'POST'});}
-async function registerIdentity(){await fetch('/btc/identity/register',{method:'POST'});}
+async function registerIdentity(){var d=await fetch('/btc/identity/register',{method:'POST'}).then(function(r){return r.json();});showT(d.status==='ok'?'Identity registered':'identity fail',d.status==='ok');refresh();}
 async function sendBroadcast(action){var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
 var data=await fetch('/command/broadcast',{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.action;}
 async function sendToNode(action){var id=document.getElementById('target_node').value.trim();if(!id)return;var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
