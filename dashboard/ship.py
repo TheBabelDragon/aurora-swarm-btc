@@ -1,7 +1,11 @@
-"""Optional entry: ensures mount_all before serving."""
+"""Container entry: import app, force-mount all ops routers."""
 from __future__ import annotations
 
-from dashboard.dashboard import (
+import logging
+
+logger = logging.getLogger("aurora-dashboard.ship")
+
+from dashboard.dashboard import (  # noqa: E402
     app,
     comms,
     get_anchor,
@@ -13,17 +17,16 @@ from dashboard.dashboard import (
 try:
     from dashboard.mount_all import mount_optional_ops
 
-    mount_optional_ops(
+    mounted = mount_optional_ops(
         app,
         get_comms=lambda: comms,
         get_torrent_manager=get_torrent_manager,
         get_anchor=get_anchor,
         get_identity=get_identity,
     )
+    logger.info(f"ship mounted: {mounted}")
 except Exception as e:
-    import logging
-
-    logging.getLogger("aurora-dashboard.ship").warning(f"mount_optional_ops: {e}")
+    logger.exception(f"ship mount_optional_ops failed: {e}")
 
 if __name__ == "__main__":
     import uvicorn
