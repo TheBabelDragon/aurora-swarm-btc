@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
-from fastapi import Form
+from fastapi import Form, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger("aurora-dashboard.ops_native")
 
@@ -24,24 +25,12 @@ EXTRA_JS = r"""
   function el(id){return document.getElementById(id)}
   function ensurePanels(){
     if(el('fleet_card')) return;
-    const host=document.querySelector('.card');
-    if(!host) return;
+    const cards=document.querySelectorAll('.card');
+    const host=cards[0];
+    if(!host||!host.parentNode) return;
     const wrap=document.createElement('div');
     wrap.className='card';
-    wrap.innerHTML=`<h2>Fleet</h2>
-<div id="fleet_card" class="muted">No worker telemetry yet — start a miner worker to publish hashrate.</div>
-<h2 style="margin-top:18px">BVL transfer</h2>
-<p class="muted">Mesh credit only. Confirm recipient id exactly. Optional: require known node.</p>
-<div class="section">
-<input id="xfer_to" placeholder="to node id">
-<input id="xfer_confirm" placeholder="confirm node id">
-<input id="xfer_amount" type="number" step="any" min="0" placeholder="amount" style="width:120px">
-<input id="xfer_memo" placeholder="memo (optional)">
-<label class="muted"><input type="checkbox" id="xfer_known"> require known node</label>
-<button onclick="bvlTransferSafe()">Transfer BVL</button>
-</div>
-<div id="xfer_result" style="min-height:18px;margin-top:8px"></div>`;
-    // insert after first status card
+    wrap.innerHTML='<h2>Fleet</h2><div id="fleet_card" class="muted">No worker telemetry yet — start a miner worker to publish hashrate.</div><h2 style="margin-top:18px">BVL transfer</h2><p class="muted">Mesh credit only. Type recipient id twice. Optional: require known node.</p><div class="section"><input id="xfer_to" placeholder="to node id"><input id="xfer_confirm" placeholder="confirm node id"><input id="xfer_amount" type="number" step="any" min="0" placeholder="amount" style="width:120px"><input id="xfer_memo" placeholder="memo (optional)"><label class="muted"><input type="checkbox" id="xfer_known"> require known node</label><button type="button" onclick="bvlTransferSafe()">Transfer BVL</button></div><div id="xfer_result" style="min-height:18px;margin-top:8px"></div>';
     host.parentNode.insertBefore(wrap, host.nextSibling);
   }
   async function refreshFleet(){
@@ -50,22 +39,20 @@ EXTRA_JS = r"""
       const d=await fetch('/mesh/fleet').then(r=>r.json());
       const nodes=d.nodes||[];
       if(!nodes.length){
-        el('fleet_card').innerHTML='No active mesh nodes registered.';
+        el('fleet_card').textContent='No active mesh nodes registered.';
         return;
       }
       let h='<table><tr><th>Node</th><th>Type</th><th>Caps</th><th>Hashrate</th><th>Status</th></tr>';
       for(const n of nodes){
         const hr=n.hashrate_ghs;
-        const hrText=(hr==null||hr===undefined)?'—':(hr+' GH/s');
-        h+=`<tr><td class="mono">${n.node_id||''}</td><td>${n.node_type||''}</td>
-<td class="muted">${(n.capabilities||[]).join(', ')}</td>
-<td>${hrText}</td><td>${n.status||'—'}</td></tr>`;
+        const hrText=(hr===null||hr===undefined)?'—':(hr+' GH/s');
+        h+='<tr><td class="mono">'+(n.node_id||'')+'</td><td>'+(n.node_type||'')+'</td><td class="muted">'+(n.capabilities||[]).join(', ')+'</td><td>'+hrText+'</td><td>'+(n.status||'—')+'</td></tr>';
       }
       h+='</table>';
-      if(d.cluster_shares!=null) h+=`<p class="muted">cluster shares accepted: ${d.cluster_shares}</p>`;
+      if(d.cluster_shares!=null) h+='<p class="muted">cluster shares accepted: '+d.cluster_shares+'</p>';
       el('fleet_card').innerHTML=h;
     }catch(e){
-      if(el('fleet_card')) el('fleet_card').innerHTML='Fleet endpoint unavailable';
+      if(el('fleet_card')) el('fleet_card').textContent='Fleet endpoint unavailable';
     }
   }
   window.bvlTransferSafe=async function(){
@@ -83,9 +70,9 @@ EXTRA_JS = r"""
     if(known) fd.append('require_known','1');
     const data=await fetch('/bvl/transfer_safe',{method:'POST',body:fd}).then(r=>r.json());
     const ok=!!(data.ok||data.status==='ok');
-    const msg=ok?`Transferred ${data.amount} → ${data.to} (fee ${data.fee||0})`:(data.error||data.detail||'transfer failed');
+    const msg=ok?('Transferred '+data.amount+' → '+data.to+' (fee '+(data.fee||0)+')'):(data.error||data.detail||'transfer failed');
     const out=el('xfer_result');
-    out.innerText=msg;
+    out.textContent=msg;
     out.className=ok?'success':'error';
     if(ok && typeof refresh==='function') setTimeout(refresh,400);
   };
@@ -96,7 +83,36 @@ EXTRA_JS = r"""
 """
 
 
+class _InjectExtraJS(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path != "/":
+            return response
+        ctype = response.headers.get("content-type", "")
+        if "text/html" not in ctype:
+            return response
+        body = b""
+        async for chunk in response.body_iterator:
+            body += chunk
+        if b"/ux/extra.js" not in body and b"</body>" in body:
+            body = body.replace(
+                b"</body>",
+                b'<script src="/ux/extra.js"></script></body>',
+                1,
+            )
+        headers = dict(response.headers)
+        headers.pop("content-length", None)
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=headers,
+            media_type=ctype.split(";")[0] if ctype else "text/html",
+        )
+
+
 def install_ops_native(app: Any, *, get_comms: Callable[[], Any]):
+    app.add_middleware(_InjectExtraJS)
+
     @app.get("/mesh/fleet")
     def mesh_fleet():
         comms = get_comms()
@@ -112,7 +128,6 @@ def install_ops_native(app: Any, *, get_comms: Callable[[], Any]):
             nid = n.get("node_id") or ""
             meta = n.get("metadata") or {}
             hr = meta.get("hashrate_ghs")
-            # Prefer per-node published rate
             try:
                 st = comms.get_state(f"worker:{nid}:hashrate")
                 if isinstance(st, dict) and st.get("hashrate_ghs") is not None:
@@ -126,7 +141,7 @@ def install_ops_native(app: Any, *, get_comms: Callable[[], Any]):
                     "node_id": nid,
                     "node_type": n.get("node_type"),
                     "capabilities": n.get("capabilities") or [],
-                    "hashrate_ghs": hr,  # None if never published
+                    "hashrate_ghs": hr,
                     "status": meta.get("status"),
                     "intensity": meta.get("intensity"),
                     "pool": meta.get("pool"),
@@ -159,10 +174,7 @@ def install_ops_native(app: Any, *, get_comms: Callable[[], Any]):
         confirm_to = (confirm_to or "").strip()
         if not to_node or to_node != confirm_to:
             return JSONResponse(
-                {
-                    "ok": False,
-                    "error": "confirm_to must exactly match to_node",
-                },
+                {"ok": False, "error": "confirm_to must exactly match to_node"},
                 status_code=400,
             )
         require = require_known in ("1", "true", "yes", "on")
