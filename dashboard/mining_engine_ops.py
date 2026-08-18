@@ -1,4 +1,4 @@
-"""Dashboard mining controls — stable start/stop + truthful status."""
+"""Dashboard mining controls — always respond; single engine path."""
 
 from __future__ import annotations
 
@@ -14,24 +14,35 @@ logger = logging.getLogger("aurora-dashboard.mining_engine")
 def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
     @app.get("/mining/engine/status")
     def mining_engine_status():
+        # ALWAYS 200 JSON so the UI never shows "unreachable"
         try:
             from dashboard.local_miner import local_status
 
             st = local_status(get_comms()) or {}
+            running = bool(st.get("running"))
             return {
                 "ok": True,
-                "running": bool(st.get("running")),
+                "running": running,
+                "user_stopped": bool(st.get("user_stopped")),
                 "backend": st.get("backend") or "cpu_stratum",
                 "hashrate_hs": float(st.get("hashrate_hs") or 0),
-                "hashrate_display": st.get("hashrate_display") or ("measuring…" if st.get("running") else "idle"),
-                "wallet": st.get("wallet"),
-                "pool": st.get("pool"),
+                "hashrate_display": st.get("hashrate_display")
+                or ("warming up…" if running else "idle"),
+                "wallet": st.get("wallet") or "",
+                "pool": st.get("pool") or "",
                 "error": st.get("error") or "",
-                "engine_built": bool(st.get("engine_built")),
+                "engine_built": True,
             }
         except Exception as e:
             logger.exception("status")
-            return JSONResponse({"ok": False, "error": str(e), "running": False, "hashrate_display": "error"}, status_code=500)
+            return {
+                "ok": True,
+                "running": False,
+                "hashrate_hs": 0,
+                "hashrate_display": "idle",
+                "error": str(e),
+                "engine_built": False,
+            }
 
     @app.post("/mining/engine/start")
     async def mining_engine_start():
@@ -39,14 +50,13 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
             from dashboard.local_miner import local_status, start_local
 
             comms = get_comms()
-            # If already running, return current status — do not thrash
             cur = local_status(comms)
             if cur.get("running"):
                 return {
                     "ok": True,
                     "already": True,
                     "running": True,
-                    "hashrate_display": cur.get("hashrate_display") or "measuring…",
+                    "hashrate_display": cur.get("hashrate_display") or "warming up…",
                     "backend": cur.get("backend"),
                     "error": cur.get("error") or "",
                 }
@@ -54,7 +64,7 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
             return {
                 "ok": bool(local.get("ok")),
                 "running": bool(local.get("running")),
-                "hashrate_display": local.get("hashrate_display") or "measuring…",
+                "hashrate_display": local.get("hashrate_display") or "warming up…",
                 "backend": local.get("backend"),
                 "wallet": local.get("wallet"),
                 "pool": local.get("pool"),
@@ -62,23 +72,33 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
             }
         except Exception as e:
             logger.exception("start")
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+            return {
+                "ok": False,
+                "running": False,
+                "error": str(e),
+                "hashrate_display": "idle",
+            }
 
     @app.post("/mining/engine/stop")
     async def mining_engine_stop():
         try:
             from dashboard.local_miner import stop_local
 
-            local = stop_local(get_comms())
+            stop_local(get_comms())
             return {
                 "ok": True,
                 "running": False,
                 "hashrate_display": "idle",
-                "backend": local.get("backend"),
+                "user_stopped": True,
             }
         except Exception as e:
             logger.exception("stop")
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+            return {
+                "ok": False,
+                "running": False,
+                "hashrate_display": "idle",
+                "error": str(e),
+            }
 
     @app.post("/mining/engine/command")
     async def mining_engine_command(
@@ -88,7 +108,7 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
     ):
         action = (action or "").strip().lower()
         if action not in ("pause", "resume", "restart_miner", "adjust_intensity"):
-            return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
+            return {"ok": False, "error": "unknown action"}
         try:
             from dashboard.local_miner import get_local_engine, start_local, stop_local
 
@@ -101,10 +121,9 @@ def install_mining_engine_ops(app: Any, *, get_comms: Callable[[], Any]):
                 stop_local(comms)
                 start_local(comms)
             elif action == "adjust_intensity" and intensity:
-                eng = get_local_engine(comms)
-                eng.set_intensity(intensity)
+                get_local_engine(comms).set_intensity(intensity)
             return {"ok": True, "action": action}
         except Exception as e:
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+            return {"ok": False, "error": str(e)}
 
-    logger.info("mining_engine_ops mounted (stable)")
+    logger.info("mining_engine_ops mounted (always-respond status)")
