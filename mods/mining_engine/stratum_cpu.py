@@ -1,9 +1,7 @@
 """
 Reliable pure-Python stratum CPU miner.
 
-- Thread workers (safe under uvicorn/docker — no fork/Manager deadlocks)
-- Precompute merkle/header prefix; only nonce varies in the hot loop
-- Direct hashrate counter exposed to the engine (not log-parsing only)
+Critical: extranonce1 may be empty string (Braiins). Empty is valid.
 """
 
 from __future__ import annotations
@@ -65,11 +63,14 @@ class StratumCpuMiner:
 
         self._job_lock = threading.Lock()
         self._job: Optional[Dict[str, Any]] = None
-        self._extranonce1 = ""
+        self._extranonce1 = ""  # may legitimately stay empty (Braiins)
+        self._en1_ready = False  # set True after subscribe result
         self._extranonce2_size = 4
         self._difficulty = 1.0
-        self._header_prefix: Optional[bytes] = None  # 76 bytes without nonce
+        self._header_prefix: Optional[bytes] = None
         self._job_id: Optional[str] = None
+        self._current_en2 = b"\x00" * 4
+        self._target = _diff_to_target(1.0)
 
         self._hashes = 0
         self._hashes_lock = threading.Lock()
@@ -104,7 +105,7 @@ class StratumCpuMiner:
         try:
             self._sock = socket.create_connection((host, port), timeout=20)
             self._sock.settimeout(30)
-            self._rpc("mining.subscribe", ["aurora-cpu/0.4"])
+            self._rpc("mining.subscribe", ["aurora-cpu/0.5"])
             self._rpc("mining.authorize", [self.username, self.password])
             self._emit(f"Connected {host}:{port} as {self.username}")
             self.last_error = ""
@@ -116,18 +117,18 @@ class StratumCpuMiner:
             return False
 
     def _rebuild_prefix(self):
-        """Build 76-byte header prefix (everything except nonce) for current job."""
         job = self._job
-        if not job or not self._extranonce1:
+        if not job or not self._en1_ready:
             self._header_prefix = None
             return
         try:
-            en2 = struct.pack(">I", int(time.time()) & 0xFFFFFFFF)[: self._extranonce2_size]
-            en2 = en2.ljust(self._extranonce2_size, b"\x00")
+            en2_size = max(1, int(self._extranonce2_size))
+            en2 = struct.pack(">Q", int(time.time() * 1000) & 0xFFFFFFFFFFFFFFFF)[-en2_size:]
+            en2 = en2.ljust(en2_size, b"\x00")
             self._current_en2 = en2
             coinbase = (
                 bytes.fromhex(job["coinb1"])
-                + bytes.fromhex(self._extranonce1)
+                + bytes.fromhex(self._extranonce1 or "")
                 + en2
                 + bytes.fromhex(job["coinb2"])
             )
@@ -143,7 +144,8 @@ class StratumCpuMiner:
             self._job_id = job["job_id"]
             self._target = _diff_to_target(self._difficulty)
         except Exception as e:
-            logger.debug(f"rebuild prefix: {e}")
+            logger.warning(f"rebuild prefix: {e}")
+            self.last_error = f"prefix: {e}"
             self._header_prefix = None
 
     def _handle_line(self, raw: str):
@@ -176,6 +178,8 @@ class StratumCpuMiner:
                         self._emit(f"Job score={entry.get('score')} id={str(entry.get('job_id'))[:12]}")
                     except Exception:
                         pass
+                if self._header_prefix:
+                    self._emit("Job ready — hashing")
         elif method == "mining.set_difficulty":
             try:
                 self._difficulty = float((msg.get("params") or [1])[0])
@@ -186,16 +190,23 @@ class StratumCpuMiner:
                 pass
         elif msg.get("id") is not None and "result" in msg:
             res = msg.get("result")
-            if isinstance(res, list) and len(res) >= 3 and isinstance(res[1], str):
-                with self._job_lock:
-                    self._extranonce1 = res[1]
-                    try:
-                        self._extranonce2_size = int(res[2])
-                    except Exception:
-                        self._extranonce2_size = 4
-                    self._rebuild_prefix()
+            # subscribe: [ [subs], extranonce1, extranonce2_size ] — en1 may be ""
+            if isinstance(res, list) and len(res) >= 3:
+                en1 = res[1]
+                if isinstance(en1, str):
+                    with self._job_lock:
+                        self._extranonce1 = en1  # empty string is valid
+                        self._en1_ready = True
+                        try:
+                            self._extranonce2_size = int(res[2])
+                        except Exception:
+                            self._extranonce2_size = 4
+                        self._rebuild_prefix()
+                    self._emit(f"Subscribed en1_len={len(en1)} en2_size={self._extranonce2_size}")
             if msg.get("result") is True:
                 self._emit("Authorized")
+            if msg.get("error"):
+                self._emit(f"RPC error {msg.get('error')}")
 
     def _reader_loop(self):
         buf = ""
@@ -221,20 +232,19 @@ class StratumCpuMiner:
 
     def _mine_loop(self, tid: int):
         nonce = tid
-        step = self.threads
+        step = max(1, self.threads)
         while not self._stop.is_set():
             with self._job_lock:
                 prefix = self._header_prefix
-                target = getattr(self, "_target", None)
+                target = self._target
                 job_id = self._job_id
-                en2 = getattr(self, "_current_en2", b"")
+                en2 = self._current_en2
                 ntime = self._job["ntime"] if self._job else None
-            if not prefix or target is None:
+            if not prefix:
                 time.sleep(0.05)
                 continue
-            # Hot loop: only append nonce and double-SHA256
             local = 0
-            for _ in range(20_000):
+            for _ in range(25_000):
                 if self._stop.is_set():
                     break
                 header = prefix + struct.pack("<I", nonce & 0xFFFFFFFF)
@@ -277,6 +287,7 @@ class StratumCpuMiner:
 
     def start(self) -> bool:
         self._stop.clear()
+        self._en1_ready = False
         if not self.connect():
             return False
         self._reader = threading.Thread(target=self._reader_loop, name="stratum-reader", daemon=True)
