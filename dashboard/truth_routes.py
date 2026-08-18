@@ -1,12 +1,9 @@
-"""Replace misleading torrent status; helpers for real UI data."""
+"""Replace misleading torrent status. No open BVL mint."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
-
-from fastapi import Form
-from fastapi.responses import JSONResponse
+from typing import Any, Callable
 
 logger = logging.getLogger("aurora-dashboard.truth")
 
@@ -19,7 +16,6 @@ def install_truth_routes(
     get_fabric: Callable[[], Any],
     get_anchor: Callable[[], Any],
 ):
-    # Drop prior /torrent/status so we do not double-report
     try:
         app.router.routes = [
             r
@@ -113,14 +109,4 @@ def install_truth_routes(
             "note": note,
         }
 
-    @app.post("/bvl/mint_genesis")
-    async def mint_genesis():
-        try:
-            from mods.bvl.ledger_service import BabelLedger
-
-            bvl = BabelLedger(get_comms())
-            return bvl.reward_seed("dashboard", asset_id="genesis")
-        except Exception as e:
-            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
-
-    logger.info("truth routes installed")
+    logger.info("truth routes installed (no open mint)")

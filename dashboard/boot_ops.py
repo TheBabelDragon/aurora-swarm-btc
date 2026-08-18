@@ -1,4 +1,4 @@
-"""Mount ops + truthful status + native fleet/transfer when dashboard loads."""
+"""Mount ops + truthful status + native fleet/transfer; start BVL economy."""
 from __future__ import annotations
 
 import logging
@@ -64,5 +64,14 @@ def boot(
         install_ops_native(app, get_comms=get_comms)
     except Exception as e:
         logger.warning(f"ops_native: {e}")
+
+    # BVL mint path: swarm events only
+    try:
+        from mods.bvl.economy import start_economy
+
+        start_economy(get_comms())
+        logger.info("BVL EconomyReactor started")
+    except Exception as e:
+        logger.warning(f"economy reactor: {e}")
 
     app.state.aurora_booted = True
