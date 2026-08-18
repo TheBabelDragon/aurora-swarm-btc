@@ -4,8 +4,9 @@ AssetAnchor — attestation service for swarm assets.
 Pipeline:
   1. prepare / record     → mesh AnchorRecord (always)
   2. request_broadcast    → enqueue for on-chain write
-  3. process_queue        → call pluggable Broadcaster
-  4. mark_broadcast       → upgrade record with txid when confirmed
+  3. process_queue        → single-asset Broadcaster
+  4. process_queue_batched → Merkle root + one batch payload
+  5. mark_broadcast       → upgrade record with txid when confirmed
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from .commitment import compute_commitment, short_id
 from .records import AnchorRecord
 from .queue import BroadcastQueue
 from .broadcaster import Broadcaster, default_broadcaster, BroadcastResult
+from .merkle import merkle_root, merkle_proof, batch_op_return_payload
 
 logger = logging.getLogger("aurora.btc_anchor")
 
@@ -144,12 +146,7 @@ class AssetAnchor:
             logger.warning(f"anchor_manifest failed: {e}")
             return None
 
-    # ------------------------------------------------------------------
-    # Broadcast path
-    # ------------------------------------------------------------------
-
     def request_broadcast(self, asset_id: str, commitment: Optional[str] = None) -> bool:
-        """Enqueue an asset for on-chain (or simulated) broadcast."""
         asset_id = str(asset_id).strip().lower()
         rec = self.get(asset_id)
         if not commitment:
@@ -165,11 +162,6 @@ class AssetAnchor:
         return True
 
     def process_queue(self, max_items: int = 5) -> List[Dict[str, Any]]:
-        """
-        Drain pending queue through the configured Broadcaster.
-
-        Call from a worker loop or dashboard maintenance tick.
-        """
         results = []
         pending = self.queue.list_pending()[:max_items]
         for item in pending:
@@ -197,6 +189,71 @@ class AssetAnchor:
                 results.append({"asset_id": asset_id, "ok": False, "error": result.error})
         return results
 
+    def process_queue_batched(self, max_items: int = 32) -> Dict[str, Any]:
+        """
+        Batch pending commitments into one Merkle root and one broadcast attempt.
+
+        Each asset still gets an individual mesh upgrade with the shared batch txid
+        and a stored Merkle proof for later inclusion checks.
+        """
+        pending = self.queue.list_pending()[:max_items]
+        if not pending:
+            return {"ok": True, "count": 0, "message": "empty queue"}
+
+        commitments = [p["commitment"] for p in pending]
+        asset_ids = [p["asset_id"] for p in pending]
+        root = merkle_root(commitments)
+        payload = batch_op_return_payload(root, len(commitments))
+
+        # Build a synthetic batch record for the broadcaster
+        batch_rec = AnchorRecord(
+            asset_id="batch:" + root[:16],
+            commitment=root,
+            status="pending_broadcast",
+            created_by=self.node_id,
+            method="merkle_batch",
+            meta={
+                "batch": True,
+                "count": len(commitments),
+                "asset_ids": asset_ids,
+                "op_return_hex": payload.hex(),
+            },
+        )
+        result = self.broadcaster.broadcast(batch_rec)
+        out = {
+            "ok": result.ok,
+            "count": len(pending),
+            "root": root,
+            "txid": result.txid,
+            "error": result.error,
+            "assets": [],
+        }
+        if not result.ok or not result.txid:
+            for p in pending:
+                self.queue.mark(p["asset_id"], "pending", error=result.error)
+            return out
+
+        for i, p in enumerate(pending):
+            proof = merkle_proof(commitments, i)
+            self.queue.mark(p["asset_id"], "submitted", txid=result.txid)
+            rec = self.get(p["asset_id"])
+            if rec:
+                rec.meta = dict(rec.meta or {})
+                rec.meta["merkle_root"] = root
+                rec.meta["merkle_proof"] = proof
+                rec.meta["batch"] = True
+                self.comms.set_state(f"{STATE_PREFIX}{p['asset_id']}", rec.to_dict(), expire=0)
+            self.mark_broadcast(
+                p["asset_id"],
+                txid=result.txid,
+                network=result.network,
+                method="merkle_batch_" + (result.method or "broadcast"),
+            )
+            out["assets"].append({"asset_id": p["asset_id"], "proof_len": len(proof)})
+
+        logger.info(f"Batch anchored {len(pending)} assets root={root[:16]}… txid={result.txid}")
+        return out
+
     def mark_broadcast(
         self,
         asset_id: str,
@@ -204,11 +261,9 @@ class AssetAnchor:
         network: str = "bitcoin",
         method: str = "op_return",
     ) -> Optional[AnchorRecord]:
-        """Upgrade a mesh record after a successful write (real or log)."""
         rec = self.get(asset_id)
         if not rec:
             return None
-        # log: txids are not real chain txs
         if txid.startswith("log:"):
             rec.status = "submitted"
             rec.note = f"Log-broadcast (not on-chain): {txid}"

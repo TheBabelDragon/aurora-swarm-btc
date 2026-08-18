@@ -1,0 +1,9 @@
+{
+  "name": "btc_identity",
+  "type": "comms",
+  "version": "0.1.0",
+  "entry": "entrypoint.py",
+  "enabled": true,
+  "dependencies": ["comms"],
+  "description": "Bitcoin-style node identity: key material, fingerprints, signed mesh claims"
+}
