@@ -1,4 +1,4 @@
-"""Mount ops — additive; auto paths so UI never needs curl."""
+"""Mount ops — mining routes already on app via mining_standalone."""
 from __future__ import annotations
 
 import logging
@@ -20,14 +20,6 @@ def boot(
     if getattr(app.state, "aurora_booted", False):
         return
 
-    # Apply mining guards before any auto-mine
-    try:
-        from mods.mining_engine.stratum_guard import apply_stratum_guards
-
-        apply_stratum_guards()
-    except Exception as e:
-        logger.warning(f"stratum_guard: {e}")
-
     try:
         from dashboard.html_fix import install_html_fix
 
@@ -45,16 +37,15 @@ def boot(
     try:
         from dashboard.mount_all import mount_optional_ops
 
-        mounted = mount_optional_ops(
+        mount_optional_ops(
             app,
             get_comms=get_comms,
             get_torrent_manager=get_torrent_manager,
             get_anchor=get_anchor,
             get_identity=get_identity,
         )
-        logger.info(f"boot mounted: {mounted}")
     except Exception as e:
-        logger.warning(f"mount_all failed: {e}")
+        logger.warning(f"mount_all: {e}")
 
     try:
         from dashboard.comms_ops import install_comms_ops
@@ -97,12 +88,7 @@ def boot(
     except Exception as e:
         logger.warning(f"ops_native: {e}")
 
-    try:
-        from dashboard.mining_engine_ops import install_mining_engine_ops
-
-        install_mining_engine_ops(app, get_comms=get_comms)
-    except Exception as e:
-        logger.warning(f"mining_engine_ops: {e}")
+    # DO NOT install mining_engine_ops — mining_standalone owns those paths
 
     try:
         from dashboard.mining_coins_ops import install_mining_coins_ops
@@ -111,20 +97,16 @@ def boot(
     except Exception as e:
         logger.warning(f"mining_coins_ops: {e}")
 
-    try:
-        from dashboard.status_live import install_status_live
-
-        install_status_live(app, get_comms=get_comms, bus=bus)
-    except Exception as e:
-        logger.warning(f"status_live: {e}")
+    # DO NOT install status_live over /status — dashboard.py serves mining-aware /status
 
     try:
         from mods.bvl.economy import start_economy
 
         start_economy(get_comms())
     except Exception as e:
-        logger.warning(f"economy reactor: {e}")
+        logger.warning(f"economy: {e}")
 
+    # Auto-mine OFF unless env forces it
     try:
         from dashboard.auto_mine import start_auto_mine
 
@@ -146,23 +128,14 @@ def boot(
     except Exception as e:
         logger.warning(f"stability: {e}")
 
-    # Auto identity on process start (no button / no curl)
     try:
         from mods.btc_identity.identity import NodeIdentity
 
-        ident = None
-        if get_identity:
-            try:
-                ident = get_identity()
-            except Exception:
-                ident = None
-        if not ident:
-            ident = NodeIdentity(get_comms())
-        ident.register_with_identity(
+        NodeIdentity(get_comms()).register_with_identity(
             capabilities=["dashboard", "mesh", "mining_engine", "chat", "btc_identity"]
         )
-        logger.info("auto identity registered at boot")
     except Exception as e:
         logger.warning(f"auto identity: {e}")
 
     app.state.aurora_booted = True
+    logger.info("boot complete (mining_standalone is authority for mine routes)")
