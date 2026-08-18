@@ -17,6 +17,7 @@ bus = Bus()
 comms = CommsLayer(node_id="dashboard")
 
 _torrent_manager = None
+_anchor_service = None
 UPLOAD_DIR = Path(os.getenv("AURORA_UPLOAD_DIR", "/tmp/aurora_uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -33,6 +34,18 @@ def get_torrent_manager():
             _torrent_manager = False
     return _torrent_manager if _torrent_manager is not False else None
 
+def get_anchor():
+    global _anchor_service
+    if _anchor_service is None:
+        try:
+            from mods.btc_anchor.anchor import AssetAnchor
+            _anchor_service = AssetAnchor(comms)
+            logger.info("Dashboard AssetAnchor online")
+        except Exception as e:
+            logger.debug(f"btc_anchor not available: {e}")
+            _anchor_service = False
+    return _anchor_service if _anchor_service is not False else None
+
 
 @app.get("/status")
 def status():
@@ -46,7 +59,7 @@ def status():
         "active_workers": len(workers) if workers else bus.get("worker_count", 0),
         "current_coin": bus.get("cluster:current_coin", "BTC"),
         "mood": "THEY YEARN FOR THE MINES" if entropy > 2.5 else "Patiently Hashing",
-        "message": "They do yearn. Now with full Comms Layer + Torrent Swarm.",
+        "message": "They do yearn. Mesh + Asset Fabric + optional attestation.",
         "comms_nodes_registered": len(comms.get_active_nodes())
     }
 
@@ -66,8 +79,6 @@ def comms_health():
         "active_nodes": len(comms.get_active_nodes()),
         "recent_events_count": len(comms.get_recent_events(5))
     }
-
-# === Command API ===
 
 @app.post("/command/broadcast")
 async def broadcast_command(action: str = Form(...), factor: float = Form(None), reason: str = Form("manual")):
@@ -92,8 +103,26 @@ async def command_to_node(node_id: str, action: str = Form(...), factor: float =
     return {"status": "sent", "action": action, "target": node_id}
 
 # =====================================================================
-# ASSET TRANSFER MANAGER API
+# ASSET TRANSFER + ATTESTATION API
 # =====================================================================
+
+def _anchor_view(asset_id: str) -> Optional[Dict[str, Any]]:
+    anc = get_anchor()
+    if not anc:
+        return None
+    try:
+        rec = anc.get(asset_id)
+        if not rec:
+            return None
+        return {
+            "status": rec.status,
+            "commitment": rec.commitment,
+            "txid": rec.txid,
+            "method": rec.method,
+            "created_at": rec.created_at,
+        }
+    except Exception:
+        return None
 
 @app.get("/torrent/status")
 def torrent_status():
@@ -103,12 +132,14 @@ def torrent_status():
     local = []
     if tm:
         local = tm.list_torrents()
-        # Enrich with size from meta when possible
         for t in local:
             meta = tm.torrents.get(t.get("infohash"))
             if meta:
                 t["size"] = meta.size
                 t["name"] = t.get("name") or meta.name
+            ih = t.get("infohash")
+            if ih:
+                t["anchor"] = _anchor_view(ih)
 
     announced = []
     try:
@@ -129,6 +160,7 @@ def torrent_status():
 
     downloading = [t for t in local if not t.get("complete")]
     seeding = [t for t in local if t.get("complete")]
+    anc = get_anchor()
 
     return {
         "torrent_capable_nodes": len(torrent_nodes),
@@ -137,6 +169,7 @@ def torrent_status():
         "seeding": seeding,
         "announced_torrents": announced,
         "dashboard_has_manager": tm is not None,
+        "dashboard_has_anchor": anc is not None,
     }
 
 @app.get("/torrent/list")
@@ -147,7 +180,11 @@ def torrent_list():
     return {"torrents": tm.list_torrents()}
 
 @app.post("/torrent/upload")
-async def torrent_upload(file: UploadFile = File(...), name: str = Form(None)):
+async def torrent_upload(
+    file: UploadFile = File(...),
+    name: str = Form(None),
+    anchor: str = Form(None),
+):
     tm = get_torrent_manager()
     if not tm:
         return JSONResponse({"status": "error", "detail": "No local TorrentManager"}, status_code=400)
@@ -165,13 +202,26 @@ async def torrent_upload(file: UploadFile = File(...), name: str = Form(None)):
         meta = tm.create_torrent(dest, name=safe_name)
         tm.announce(meta.infohash)
 
-        logger.info(f"[DASH] Uploaded + announced {meta.infohash[:12]}… ({len(content)} bytes)")
+        anchored = False
+        if anchor in ("1", "true", "yes", "on"):
+            anc = get_anchor()
+            if anc:
+                try:
+                    from mods.asset_fabric.manifest_model import AssetManifest
+                    manifest = AssetManifest.from_torrent_meta(meta)
+                    anc.anchor_manifest(manifest)
+                    anchored = True
+                except Exception as e:
+                    logger.warning(f"Anchor on upload failed: {e}")
+
+        logger.info(f"[DASH] Uploaded + announced {meta.infohash[:12]}… ({len(content)} bytes) anchored={anchored}")
         return {
             "status": "ok",
             "infohash": meta.infohash,
             "name": meta.name,
             "size": meta.size,
             "num_pieces": len(meta.piece_hashes),
+            "anchored": anchored,
         }
     except Exception as e:
         logger.exception("Upload/create torrent failed")
@@ -198,7 +248,6 @@ async def torrent_ensure(infohash: str = Form(...), name: str = Form(None)):
     if tm:
         local_result = tm.ensure_asset(infohash=infohash, name=name)
 
-    logger.info(f"[DASH] ensure_asset {infohash[:12]}… local={local_result}")
     return {
         "status": "ok",
         "infohash": infohash,
@@ -222,12 +271,36 @@ async def torrent_cancel(infohash: str = Form(...)):
     infohash = infohash.strip().lower()
     tm.wanted.discard(infohash)
     tm.pending.pop(infohash, None)
-    logger.info(f"[DASH] Cancelled / removed from wanted: {infohash[:12]}…")
     return {"status": "ok", "infohash": infohash}
+
+@app.post("/torrent/anchor")
+async def torrent_anchor(infohash: str = Form(...)):
+    """Record a mesh content commitment for a known local asset."""
+    anc = get_anchor()
+    if not anc:
+        return JSONResponse({"status": "error", "detail": "btc_anchor not available"}, status_code=400)
+    tm = get_torrent_manager()
+    if not tm:
+        return JSONResponse({"status": "error", "detail": "No local TorrentManager"}, status_code=400)
+
+    infohash = infohash.strip().lower()
+    meta = tm.torrents.get(infohash)
+    if not meta:
+        return JSONResponse({"status": "error", "detail": "Unknown asset on this node"}, status_code=404)
+
+    try:
+        from mods.asset_fabric.manifest_model import AssetManifest
+        manifest = AssetManifest.from_torrent_meta(meta)
+        rec = anc.anchor_manifest(manifest)
+        if not rec:
+            return JSONResponse({"status": "error", "detail": "anchor_manifest failed"}, status_code=500)
+        return {"status": "ok", "infohash": infohash, "commitment": rec.commitment, "anchor_status": rec.status}
+    except Exception as e:
+        logger.exception("Anchor failed")
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 @app.get("/torrent/file/{infohash}")
 def torrent_file(infohash: str):
-    """Download a completed asset from the dashboard node."""
     tm = get_torrent_manager()
     if not tm:
         return JSONResponse({"status": "error", "detail": "No local TorrentManager"}, status_code=400)
@@ -266,14 +339,17 @@ def root():
             .control-group { margin: 15px 0; }
             input, input[type=file] { background: #000; color: #0f0; border: 1px solid #0f0; padding: 6px; margin: 4px; border-radius: 4px; }
             input[type=text] { width: 260px; }
+            label.chk { color: #6a6; font-size: 0.9em; margin-left: 8px; }
             .success { color: #0f0; }
             .error { color: #f66; }
-            .progress-bar { background: #222; border: 1px solid #0f0; height: 14px; border-radius: 4px; overflow: hidden; margin: 4px 0 4px 0; }
+            .progress-bar { background: #222; border: 1px solid #0f0; height: 14px; border-radius: 4px; overflow: hidden; margin: 4px 0; }
             .progress-fill { background: #0a0; height: 100%; transition: width 0.35s; }
             .muted { color: #6a6; font-size: 0.85em; }
             .badge { display: inline-block; background: #003300; border: 1px solid #0f0; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; margin-left: 4px; }
             .badge.warn { background: #330; border-color: #aa0; color: #ff0; }
             .badge.ok { background: #030; border-color: #0f0; }
+            .badge.anchor { background: #012; border-color: #0af; color: #0af; }
+            .badge.confirmed { background: #102; border-color: #f0f; color: #f0f; }
             table { width: 100%; border-collapse: collapse; margin-top: 8px; }
             td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
             th { color: #6a6; font-weight: normal; font-size: 0.8em; }
@@ -285,7 +361,7 @@ def root():
     </head>
     <body>
         <h1>🚀 Aurora Swarm BTC — Comms Operations Center</h1>
-        <p><strong>They yearn for the mines... and now you can move their assets.</strong></p>
+        <p><strong>They yearn for the mines... and now their assets can be attested.</strong></p>
 
         <div class="card">
             <h2>Swarm Status</h2>
@@ -298,16 +374,16 @@ def root():
 
             <div class="section">
                 <h3>Upload & Seed</h3>
-                <p class="muted">Upload any file. Dashboard becomes the initial seeder and announces it to the mesh.</p>
+                <p class="muted">Upload a file → swarm asset. Optionally record a content commitment (mesh attestation).</p>
                 <input type="file" id="upload_file">
                 <input type="text" id="upload_name" placeholder="optional display name">
+                <label class="chk"><input type="checkbox" id="upload_anchor"> also anchor</label>
                 <button id="upload_btn" onclick="uploadAsset()">Upload & Announce</button>
             </div>
 
             <div class="section">
                 <h3>Download by Infohash</h3>
-                <p class="muted">Paste an infohash to pull an asset from the swarm onto this node (and tell every other manager too).</p>
-                <input type="text" id="ensure_infohash" placeholder="infohash">
+                <input type="text" id="ensure_infohash" placeholder="infohash / asset id">
                 <input type="text" id="ensure_name" placeholder="optional name" style="width:160px">
                 <button onclick="ensureAsset()">Ensure / Download</button>
                 <button onclick="forceAnnounce()">Force Announce</button>
@@ -373,11 +449,14 @@ def root():
             }
 
             function copyText(text) {
-                navigator.clipboard.writeText(text).then(() => {
-                    showTorrentResult('Copied infohash', true);
-                }).catch(() => {
-                    showTorrentResult('Copy failed', false);
-                });
+                navigator.clipboard.writeText(text).then(() => showTorrentResult('Copied', true))
+                    .catch(() => showTorrentResult('Copy failed', false));
+            }
+
+            function anchorBadge(a) {
+                if (!a) return '';
+                if (a.status === 'confirmed') return `<span class="badge confirmed" title="${(a.commitment||'').slice(0,16)}…">anchored ✓</span>`;
+                return `<span class="badge anchor" title="${(a.commitment||'').slice(0,16)}…">attested</span>`;
             }
 
             async function refresh() {
@@ -398,10 +477,10 @@ def root():
                 } catch(e) { console.error(e); }
             }
 
-            function renderTorrentTable(items, mode) {
+            function renderTorrentTable(items) {
                 if (!items || items.length === 0) return '<p class="empty">None</p>';
                 let html = `<table><thead><tr>
-                    <th>Name / Infohash</th><th>Size</th><th>Progress</th><th>Pieces</th><th>Status</th><th></th>
+                    <th>Name / Asset id</th><th>Size</th><th>Progress</th><th>Pieces</th><th>Status</th><th></th>
                 </tr></thead><tbody>`;
                 for (const t of items) {
                     const pct = t.percent || 0;
@@ -422,6 +501,7 @@ def root():
                         <td>
                             ${complete ? '<span class="badge ok">complete</span>' : '<span class="badge warn">downloading</span>'}
                             ${t.wanted && !complete ? '<span class="badge">wanted</span>' : ''}
+                            ${anchorBadge(t.anchor)}
                             ${t.pending ? `<span class="muted"> · ${t.pending} pending</span>` : ''}
                         </td>
                         <td class="row-actions">
@@ -429,6 +509,7 @@ def root():
                             ${complete ? `
                                 <a href="/torrent/file/${ih}"><button class="small">Download</button></a>
                                 <button class="small" onclick="forceAnnounceHash('${ih}')">Re-announce</button>
+                                ${!t.anchor ? `<button class="small" onclick="anchorAsset('${ih}')">Anchor</button>` : ''}
                             ` : ''}
                         </td>
                     </tr>`;
@@ -442,23 +523,22 @@ def root():
                     const data = await fetch('/torrent/status').then(r => r.json());
                     document.getElementById('torrent_summary').innerHTML =
                         `<span class="badge ok">${data.torrent_capable_nodes} torrent nodes</span>` +
-                        (data.dashboard_has_manager
-                            ? ' <span class="badge ok">manager online</span>'
-                            : ' <span class="badge warn">no local manager</span>') +
-                        ` <span class="muted">· ${(data.downloading||[]).length} downloading · ${(data.seeding||[]).length} seeding</span>`;
+                        (data.dashboard_has_manager ? ' <span class="badge ok">manager online</span>' : ' <span class="badge warn">no manager</span>') +
+                        (data.dashboard_has_anchor ? ' <span class="badge anchor">anchor ready</span>' : '') +
+                        ` <span class="muted">· ${(data.downloading||[]).length} down · ${(data.seeding||[]).length} seed</span>`;
 
-                    document.getElementById('downloading_list').innerHTML = renderTorrentTable(data.downloading || [], 'down');
-                    document.getElementById('seeding_list').innerHTML = renderTorrentTable(data.seeding || [], 'seed');
+                    document.getElementById('downloading_list').innerHTML = renderTorrentTable(data.downloading || []);
+                    document.getElementById('seeding_list').innerHTML = renderTorrentTable(data.seeding || []);
 
                     const localHashes = new Set((data.local_torrents || []).map(t => t.infohash));
                     const onlyAnnounced = (data.announced_torrents || []).filter(t => !localHashes.has(t.infohash));
                     if (onlyAnnounced.length === 0) {
                         document.getElementById('announced_list').innerHTML = '<p class="empty">None</p>';
                     } else {
-                        let html = '<table><thead><tr><th>Name</th><th>Size</th><th>Infohash</th><th>Pieces</th><th>By</th><th></th></tr></thead><tbody>';
+                        let html = '<table><thead><tr><th>Name</th><th>Size</th><th>Asset id</th><th>Pieces</th><th>By</th><th></th></tr></thead><tbody>';
                         for (const t of onlyAnnounced) {
                             const ih = t.infohash || '';
-                            const safeName = (t.name || '').replace(/'/g, "");
+                            const safeName = (t.name || '').replace(/'/g, '');
                             html += `<tr>
                                 <td>${t.name || '—'}</td>
                                 <td>${fmtSize(t.size)}</td>
@@ -480,6 +560,7 @@ def root():
             async function uploadAsset() {
                 const fileInput = document.getElementById('upload_file');
                 const name = document.getElementById('upload_name').value.trim();
+                const doAnchor = document.getElementById('upload_anchor').checked;
                 const btn = document.getElementById('upload_btn');
                 if (!fileInput.files || !fileInput.files[0]) {
                     showTorrentResult('Choose a file first', false);
@@ -488,14 +569,16 @@ def root():
                 const formData = new FormData();
                 formData.append('file', fileInput.files[0]);
                 if (name) formData.append('name', name);
+                if (doAnchor) formData.append('anchor', '1');
 
                 btn.disabled = true;
-                showTorrentResult('Uploading & creating torrent…', true);
+                showTorrentResult('Uploading…', true);
                 try {
                     const res = await fetch('/torrent/upload', { method: 'POST', body: formData });
                     const data = await res.json();
                     if (data.status === 'ok') {
-                        showTorrentResult(`✓ Seeded “${data.name}” → ${data.infohash.slice(0,12)}… (${fmtSize(data.size)}, ${data.num_pieces} pieces)`, true);
+                        const extra = data.anchored ? ' + attested' : '';
+                        showTorrentResult(`✓ Seeded “${data.name}” → ${data.infohash.slice(0,12)}… (${fmtSize(data.size)})${extra}`, true);
                         fileInput.value = '';
                         document.getElementById('upload_name').value = '';
                         setTimeout(refreshTorrent, 500);
@@ -512,7 +595,7 @@ def root():
             async function ensureAsset() {
                 const infohash = document.getElementById('ensure_infohash').value.trim();
                 const name = document.getElementById('ensure_name').value.trim();
-                if (!infohash) { showTorrentResult('Enter an infohash', false); return; }
+                if (!infohash) { showTorrentResult('Enter an asset id', false); return; }
                 await ensureHash(infohash, name);
             }
 
@@ -524,19 +607,15 @@ def root():
                     const res = await fetch('/torrent/ensure', { method: 'POST', body: formData });
                     const data = await res.json();
                     if (data.status === 'ok') {
-                        showTorrentResult(`✓ Ensure published for ${data.infohash.slice(0,12)}…`, true);
+                        showTorrentResult(`✓ Ensure for ${data.infohash.slice(0,12)}…`, true);
                         setTimeout(refreshTorrent, 600);
-                    } else {
-                        showTorrentResult(data.detail || 'Failed', false);
-                    }
-                } catch (e) {
-                    showTorrentResult('Error', false);
-                }
+                    } else showTorrentResult(data.detail || 'Failed', false);
+                } catch (e) { showTorrentResult('Error', false); }
             }
 
             async function forceAnnounce() {
                 const infohash = document.getElementById('ensure_infohash').value.trim();
-                if (!infohash) { showTorrentResult('Enter an infohash', false); return; }
+                if (!infohash) { showTorrentResult('Enter an asset id', false); return; }
                 await forceAnnounceHash(infohash);
             }
 
@@ -546,10 +625,21 @@ def root():
                 try {
                     const res = await fetch('/torrent/announce', { method: 'POST', body: formData });
                     const data = await res.json();
-                    showTorrentResult(data.status === 'ok' ? `✓ Announced ${infohash.slice(0,12)}…` : 'Announce failed (not local?)', data.status === 'ok');
-                } catch (e) {
-                    showTorrentResult('Error', false);
-                }
+                    showTorrentResult(data.status === 'ok' ? `✓ Announced ${infohash.slice(0,12)}…` : 'Announce failed', data.status === 'ok');
+                } catch (e) { showTorrentResult('Error', false); }
+            }
+
+            async function anchorAsset(infohash) {
+                const formData = new FormData();
+                formData.append('infohash', infohash);
+                try {
+                    const res = await fetch('/torrent/anchor', { method: 'POST', body: formData });
+                    const data = await res.json();
+                    if (data.status === 'ok') {
+                        showTorrentResult(`✓ Attested ${infohash.slice(0,12)}… (${(data.commitment||'').slice(0,12)}…)`, true);
+                        setTimeout(refreshTorrent, 400);
+                    } else showTorrentResult(data.detail || 'Anchor failed', false);
+                } catch (e) { showTorrentResult('Error', false); }
             }
 
             async function cancelTorrent(infohash) {
@@ -560,9 +650,7 @@ def root():
                     const data = await res.json();
                     showTorrentResult(data.status === 'ok' ? `Cancelled ${infohash.slice(0,12)}…` : 'Cancel failed', data.status === 'ok');
                     setTimeout(refreshTorrent, 400);
-                } catch (e) {
-                    showTorrentResult('Error', false);
-                }
+                } catch (e) { showTorrentResult('Error', false); }
             }
 
             function showTorrentResult(text, success) {
@@ -615,4 +703,5 @@ def root():
 
 if __name__ == "__main__":
     get_torrent_manager()
+    get_anchor()
     uvicorn.run(app, host="0.0.0.0", port=8000)
