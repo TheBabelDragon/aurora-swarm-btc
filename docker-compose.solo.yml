@@ -1,5 +1,4 @@
-# Solo / laptop: Redis + Dashboard
-# Default wallet matches helm/btc_ops — override with MINING_WALLET if desired
+# Solo: Redis + Dashboard — mining auto-starts (no curl)
 services:
   redis:
     image: redis:7-alpine
@@ -31,6 +30,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
       - AURORA_NODE_ID=dashboard
+      - AURORA_AUTO_MINE=1
+      - AURORA_MINER_BACKEND=${AURORA_MINER_BACKEND:-auto}
       - MINING_WALLET=${MINING_WALLET:-bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g}
       - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
       - INTENSITY=${INTENSITY:-19}

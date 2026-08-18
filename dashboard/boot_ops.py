@@ -1,4 +1,4 @@
-"""Mount ops + live status + mining + multi-coin + BVL economy."""
+"""Mount ops + live status + mining + auto-mine + BVL."""
 from __future__ import annotations
 
 import logging
@@ -94,5 +94,13 @@ def boot(
         logger.info("BVL EconomyReactor started")
     except Exception as e:
         logger.warning(f"economy reactor: {e}")
+
+    # Just works: start mining without curl / button
+    try:
+        from dashboard.auto_mine import start_auto_mine
+
+        start_auto_mine(get_comms)
+    except Exception as e:
+        logger.warning(f"auto_mine: {e}")
 
     app.state.aurora_booted = True
