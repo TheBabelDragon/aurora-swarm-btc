@@ -1,4 +1,4 @@
-# Host network — Redis + UDP discovery for LAN mesh
+# Host network — Redis + discovery + persistent node key
 services:
   redis:
     image: redis:7-alpine
@@ -39,6 +39,7 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://127.0.0.1:6379/0}
       - PYTHONUNBUFFERED=1
       - AURORA_NODE_ID=${AURORA_NODE_ID:-}
+      - AURORA_NODE_KEY_PATH=/data/aurora_node_key.json
       - AURORA_AUTO_MINE=${AURORA_AUTO_MINE:-1}
       - AURORA_MINER_BACKEND=${AURORA_MINER_BACKEND:-cpu}
       - AURORA_CPU_THREADS=${AURORA_CPU_THREADS:-0}
@@ -49,7 +50,10 @@ services:
       - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
       - INTENSITY=${INTENSITY:-22}
       - WORKER_NAME=${WORKER_NAME:-}
+    volumes:
+      - node_key:/data
     restart: unless-stopped
 
 volumes:
   redis_data:
+  node_key:
