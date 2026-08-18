@@ -3,3 +3,4 @@ uvicorn
 redis
 requests
 prometheus-client
+python-multipart
