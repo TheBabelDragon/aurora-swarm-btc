@@ -4,230 +4,103 @@
 body{font-family:system-ui,sans-serif;background:#0a0a0a;color:#0f0;margin:40px}
 h1,h2{color:#0f0;margin-top:0}
 .card{background:#111;border:1px solid #0f0;padding:20px;margin:20px 0;border-radius:8px}
-pre{background:#000;padding:15px;overflow-x:auto;font-size:.85em}
-.metric{font-size:2em;font-weight:bold}
-button{background:#003300;color:#0f0;border:1px solid #0f0;padding:7px 14px;margin:3px;cursor:pointer;border-radius:4px}
-button.small{padding:4px 8px;font-size:.85em}
-input,select{background:#000;color:#0f0;border:1px solid #0f0;padding:6px;margin:2px;border-radius:4px}
-.muted{color:#6a6}.mono{font-family:ui-monospace,monospace}.success{color:#0f0}.error{color:#f66}
-a{color:#0f0}
-#shared_window_status{padding:12px;border:1px solid #0f0;border-radius:6px;margin:10px 0;line-height:1.5}
-#mine_status{padding:12px;border:1px solid #0f0;border-radius:6px;margin:10px 0;line-height:1.5}
+.metric{font-size:1.6em;font-weight:bold}
+button{background:#003300;color:#0f0;border:1px solid #0f0;padding:10px 18px;margin:4px;cursor:pointer;border-radius:4px;font-size:1em}
+.muted{color:#6a6}.success{color:#0f0}.error{color:#f66}
+#mine_status{padding:14px;border:1px solid #0f0;border-radius:6px;margin:10px 0}
 </style></head><body>
 <h1>Aurora Swarm</h1>
 
 <div class="card">
-<h2>Shared window</h2>
-<div id="shared_window_status" class="muted">Checking mesh…</div>
-<div id="comms_card" class="muted"></div>
-<button type="button" onclick="connectSharedWindow()">Connect shared window</button>
-<details style="margin-top:12px">
-<summary class="muted">Manual only if auto fails</summary>
-<button type="button" class="small" onclick="commsExport()">Show join env</button>
-<a href="/comms/export.sh" download="join-aurora-mesh.sh"><button type="button" class="small">Download join.sh</button></a>
-<pre id="comms_export" class="mono muted" style="max-height:80px;overflow:auto;white-space:pre-wrap"></pre>
-</details>
-<div id="comms_result" style="min-height:18px;margin-top:8px"></div>
-
-<h2 style="margin-top:18px">Chat</h2>
-<div style="display:flex;gap:12px;flex-wrap:wrap">
-<div style="min-width:160px;flex:0 0 180px">
-<div id="chat_users" class="muted" style="max-height:200px;overflow:auto;border:1px solid #0f0;border-radius:6px;padding:6px">…</div>
+<h2>Mining</h2>
+<div id="mine_status" class="muted">…</div>
+<button type="button" id="btn_start" onclick="doStart()">Start mining</button>
+<button type="button" id="btn_stop" onclick="doStop()">Stop mining</button>
+<div id="mine_msg" class="muted" style="margin-top:8px"></div>
 </div>
-<div style="flex:1;min-width:220px">
-<div id="chat_title" class="muted">#swarm</div>
-<div id="chat_log" style="min-height:200px;max-height:300px;overflow:auto;border:1px solid #0f0;border-radius:6px;padding:8px;background:#0b0b0b"></div>
+
+<div class="card">
+<h2>Status</h2>
+<div id="status">…</div>
+</div>
+
+<div class="card">
+<h2>Shared window</h2>
+<div id="shared_window_status" class="muted">Mesh loads after mining is healthy</div>
+<button type="button" onclick="connectSharedWindow()">Connect shared window</button>
+<div id="chat_log" style="min-height:120px;border:1px solid #0f0;border-radius:6px;padding:8px;margin-top:8px"></div>
 <div style="margin-top:8px;display:flex;gap:6px">
-<input id="chat_text" placeholder="Message…" style="flex:1">
+<input id="chat_text" placeholder="Message…" style="flex:1;background:#000;color:#0f0;border:1px solid #0f0;padding:6px">
 <button type="button" onclick="chatSend()">Send</button>
 </div>
 </div>
-</div>
-</div>
 
-<div class="card"><h2>Mining</h2>
-<div id="mine_status" class="muted">Checking miner…</div>
-<button type="button" onclick="startLocalMine()">Start mining</button>
-<button type="button" onclick="stopLocalMine()">Stop mining</button>
-<button type="button" onclick="registerIdentity()">Register identity</button>
-<details style="margin-top:8px"><summary class="muted">Advanced</summary>
-<button type="button" class="small" onclick="runSelftest()">Self-test (quiet)</button>
-<div id="selftest_box" class="muted" style="margin-top:6px"></div>
-</details>
-<div id="torrent_msg" style="margin-top:8px"></div>
-</div>
-
-<div class="card"><h2>Status</h2>
-<div id="status">…</div>
-<div id="global_stats" class="muted"></div>
-<div id="bvl_status" class="muted"></div>
-<div id="identity_status" class="muted"></div>
-</div>
-
-<div class="card"><h2>Node commands</h2>
-<select id="ncc_node" onchange="nccLoad()"><option value="">— node —</option></select>
-<button type="button" class="small" onclick="nccRefreshNodes()">Refresh</button>
-<div id="ncc_detail" class="muted">—</div>
-<button type="button" onclick="nccCmd('pause')">Pause</button>
-<button type="button" onclick="nccCmd('resume')">Resume</button>
-<button type="button" onclick="nccCmd('bvl_balance')">BVL</button>
-<div id="ncc_result"></div>
-</div>
-
-<div class="card"><h2>Assets</h2>
-<input type="file" id="torrent_file">
-<button type="button" onclick="uploadTorrent()">Upload</button>
-</div>
-
-<div class="card"><h2>Nodes</h2><pre id="nodes"></pre></div>
-
-<script src="/ux/comms.js"></script>
 <script>
-function fetchTimeout(url, ms, opts){
-  ms = ms || 8000;
+function msg(t, ok){
+  var e=document.getElementById('mine_msg');
+  e.textContent=t; e.className=ok?'success':'error';
+}
+async function jfetch(url, opts, ms){
+  ms = ms || 4000;
   var c = new AbortController();
   var t = setTimeout(function(){ c.abort(); }, ms);
-  return fetch(url, Object.assign({}, opts||{}, {signal: c.signal})).finally(function(){ clearTimeout(t); });
+  try{
+    var r = await fetch(url, Object.assign({}, opts||{}, {signal: c.signal}));
+    return await r.json();
+  } finally { clearTimeout(t); }
 }
-document.getElementById('chat_text').addEventListener('keydown', function(e){ if(e.key==='Enter') chatSend(); });
-function showT(m,ok){ var e=document.getElementById('torrent_msg'); if(e){ e.textContent=m; e.className=ok?'success':'error'; } }
-
-/* Single source: /mining/engine/status for BOTH Mining card and Status mining line */
-async function fetchMineTruth(){
-  return await fetchTimeout('/mining/engine/status', 6000).then(function(r){ return r.json(); });
-}
-
 async function refreshMine(){
-  var box = document.getElementById('mine_status');
-  if(!box) return;
+  var box=document.getElementById('mine_status');
   try{
-    var d = await fetchMineTruth();
-    var running = !!d.running;
-    var rate = d.hashrate_display || (running ? 'warming up…' : 'idle');
-    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = running ? 'warming up…' : 'idle';
-    box.className = running ? 'success' : 'muted';
-    var err = d.error ? (' · <span class="error">'+d.error+'</span>') : '';
-    box.innerHTML =
-      '<strong>'+(running?'RUNNING':'STOPPED')+'</strong> · <span class="metric" style="font-size:1.2em">'+rate+'</span><br>'+
-      '<span class="muted">'+(d.backend||'cpu')+' · '+(d.pool||'')+'</span>'+err;
+    var d=await jfetch('/mining/engine/status', {}, 3000);
+    var run=!!d.running;
+    var rate=d.hashrate_display||(run?'warming up…':'idle');
+    box.className=run?'success':'muted';
+    box.innerHTML='<div class="metric">'+(run?'RUNNING':'STOPPED')+' · '+rate+'</div>'
+      +'<div class="muted">'+(d.backend||'')+' · '+(d.pool||'')+'</div>'
+      +(d.error?('<div class="error">'+d.error+'</div>'):'');
+    document.getElementById('status').innerHTML=box.innerHTML;
   }catch(e){
-    box.className = 'error';
-    box.textContent = 'Mining status unreachable';
+    box.className='error';
+    box.textContent='Cannot reach /mining/engine/status — is the container up? Try: docker compose ps';
   }
 }
-
-async function refresh(){
-  var mine = null;
-  try{ mine = await fetchMineTruth(); }catch(e){ mine = null; }
+async function doStart(){
+  msg('Starting…', true);
+  document.getElementById('btn_start').disabled=true;
   try{
-    var s = await fetchTimeout('/status', 8000).then(function(r){ return r.json(); });
-    var m = s.mining || {};
-    /* Prefer live engine endpoint so Status never contradicts Mining */
-    var running = mine ? !!mine.running : !!m.running;
-    var rate = mine ? (mine.hashrate_display || (running?'warming up…':'idle')) : (m.hashrate_display || 'idle');
-    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = running ? 'warming up…' : 'idle';
-    document.getElementById('status').innerHTML =
-      '<div class="metric">'+(running?'RUNNING':'STOPPED')+'</div>'+
-      '<p><strong>'+rate+'</strong> · '+(s.mood||'')+'</p>'+
-      '<p class="muted">this node only · fleet '+(s.fleet_hashrate_display||'—')+'</p>';
-    try{
-      var g = await fetchTimeout('/comms/global', 6000).then(function(r){ return r.json(); });
-      var b = g.bvl || {};
-      document.getElementById('global_stats').innerHTML =
-        'Global <strong>'+(g.global_hashrate_display||'idle')+'</strong> · peers '+(g.peer_count||0)+
-        ' · BVL supply '+(b.supply||0);
-      document.getElementById('bvl_status').textContent = 'BVL '+(b.balance||0);
-      if(g.identity) document.getElementById('identity_status').textContent = 'fp '+(g.identity.fingerprint||'');
-    }catch(e){}
-    try{
-      document.getElementById('nodes').innerText = JSON.stringify(await fetchTimeout('/nodes',6000).then(function(r){return r.json();}), null, 2);
-    }catch(e){}
-    if(typeof nccRefreshNodes==='function') nccRefreshNodes();
+    var d=await jfetch('/mining/engine/start',{method:'POST'}, 5000);
+    msg(d.ok?'Started — hashing in background':(d.error||'failed'), !!d.ok);
   }catch(e){
-    document.getElementById('status').innerHTML = '<span class="error">Status unreachable</span>';
+    msg('Start failed to reach server', false);
   }
-  if(mine){
-    var box = document.getElementById('mine_status');
-    if(box){
-      var running = !!mine.running;
-      var rate = mine.hashrate_display || (running?'warming up…':'idle');
-      box.className = running ? 'success' : 'muted';
-      box.innerHTML =
-        '<strong>'+(running?'RUNNING':'STOPPED')+'</strong> · <span class="metric" style="font-size:1.2em">'+rate+'</span><br>'+
-        '<span class="muted">'+(mine.backend||'cpu')+' · '+(mine.pool||'')+'</span>';
-    }
-  } else {
-    refreshMine();
+  document.getElementById('btn_start').disabled=false;
+  refreshMine();
+}
+async function doStop(){
+  msg('Stopping…', true);
+  try{
+    await jfetch('/mining/engine/stop',{method:'POST'}, 5000);
+    msg('Stopped', true);
+  }catch(e){
+    msg('Stop failed to reach server', false);
   }
+  refreshMine();
 }
-async function startLocalMine(){
-  showT('Starting…', true);
+async function connectSharedWindow(){
   try{
-    var d=await fetchTimeout('/mining/engine/start',20000,{method:'POST'}).then(function(r){return r.json();});
-    showT(d.ok?('Start ok · '+(d.hashrate_display||'')):(d.error||'fail'), !!d.ok);
-    await refresh();
-  }catch(e){ showT('start timeout', false); }
-}
-async function stopLocalMine(){
-  showT('Stopping…', true);
-  try{
-    var d=await fetchTimeout('/mining/engine/stop',10000,{method:'POST'}).then(function(r){return r.json();});
-    showT('STOPPED', true);
-    await refresh();
-  }catch(e){ showT('stop timeout', false); }
-}
-async function nccRefreshNodes(){
-  try{
-    var d=await fetchTimeout('/comms/chat/users',6000).then(function(r){return r.json();});
-    var sel=document.getElementById('ncc_node'); var cur=sel.value;
-    sel.innerHTML='<option value="">— node —</option>';
-    (d.users||[]).forEach(function(u){
-      if(u.source==='self') return;
-      var o=document.createElement('option'); o.value=u.node_id; o.textContent=(u.online?'● ':'○ ')+u.node_id; sel.appendChild(o);
-    });
-    if(cur) sel.value=cur;
+    await jfetch('/comms/join_mesh',{method:'POST',body:new FormData()},8000);
   }catch(e){}
 }
-async function nccLoad(){
-  var id=document.getElementById('ncc_node').value; if(!id) return;
+async function chatSend(){
+  var input=document.getElementById('chat_text');
+  var text=(input.value||'').trim(); if(!text) return;
   try{
-    var d=await fetchTimeout('/comms/node/'+encodeURIComponent(id),6000).then(function(r){return r.json();});
-    document.getElementById('ncc_detail').textContent=id+' · '+(d.online?'online':'offline')+' · BVL '+d.bvl_balance;
+    await jfetch('/comms/chat/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,room:'swarm'})},5000);
+    input.value='';
   }catch(e){}
 }
-async function nccCmd(action){
-  var id=document.getElementById('ncc_node').value; if(!id) return;
-  var fd=new FormData(); fd.append('action',action);
-  try{
-    var d=await fetchTimeout('/comms/node/'+encodeURIComponent(id)+'/command',10000,{method:'POST',body:fd}).then(function(r){return r.json();});
-    document.getElementById('ncc_result').textContent=d.ok?(action+' ok'):(d.error||'fail');
-  }catch(e){}
-}
-async function uploadTorrent(){
-  var f=document.getElementById('torrent_file').files[0]; if(!f) return;
-  var fd=new FormData(); fd.append('file',f);
-  try{
-    var data=await fetchTimeout('/torrent/upload',30000,{method:'POST',body:fd}).then(function(r){return r.json();});
-    showT(data.status==='ok'?'Seeded':'fail', data.status==='ok');
-  }catch(e){ showT('timeout', false); }
-}
-async function registerIdentity(){
-  try{
-    var d=await fetchTimeout('/btc/identity/register',10000,{method:'POST'}).then(function(r){return r.json();});
-    if(d.status!=='ok') d=await fetchTimeout('/btc/identity/register_safe',10000,{method:'POST'}).then(function(r){return r.json();});
-    showT(d.status==='ok'?'Identity ok':'fail', d.status==='ok'); refresh();
-  }catch(e){}
-}
-async function runSelftest(){
-  var box=document.getElementById('selftest_box'); if(box) box.textContent='…';
-  try{
-    var d=await fetchTimeout('/ops/selftest',20000).then(function(r){return r.json();});
-    var h=d.ok?'<span class="success">All ok</span>':'<span class="error">Issues</span>';
-    (d.results||[]).forEach(function(r){ h+='<div>'+(r.ok?'✓':'✗')+' '+r.name+'</div>'; });
-    if(box) box.innerHTML=h;
-  }catch(e){ if(box) box.textContent='timeout'; }
-}
-refresh();
-setInterval(refresh, 3000);
+refreshMine();
+setInterval(refreshMine, 2000);
 </script>
 </body></html>
