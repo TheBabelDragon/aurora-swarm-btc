@@ -2,7 +2,8 @@
 Byzantine verify-on-receive for TorrentManager.
 
 Wraps _on_piece_data so invalid pieces never enter local state.
-Also attaches PieceChallenger, topology, RepairPlanner, RepairExecutor.
+Also attaches PieceChallenger, topology, RepairPlanner, RepairExecutor,
+and optional EpochTicker (AURORA_EPOCH_TICK=1).
 """
 
 from __future__ import annotations
@@ -227,6 +228,18 @@ def attach_byzantine_receive(manager: Any) -> bool:
         )
     except Exception as e:
         logger.debug(f"topology/repair not attached: {e}")
+
+    try:
+        from mods.asset_fabric.epoch_tick import start_epoch_ticker
+
+        manager.epoch_ticker = start_epoch_ticker(
+            manager.comms,
+            possession=getattr(manager, "possession", None),
+            topology_registry=getattr(manager, "topology", None),
+            policy=getattr(getattr(manager, "repair_planner", None), "policy", None),
+        )
+    except Exception as e:
+        logger.debug(f"epoch ticker not attached: {e}")
 
     logger.info(f"Byzantine verify-on-receive attached on {manager.node_id}")
     return True
