@@ -7,8 +7,6 @@ import signal
 import sys
 from pathlib import Path
 
-# Allow `python worker/miner_worker.py` from repo root OR host runs
-# where comms/ lives next to worker/
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -18,12 +16,6 @@ if str(_APP) not in sys.path:
 
 import prometheus_client as prom
 from comms.layer import CommsLayer
-
-"""
-Aurora Swarm BTC - Production Miner Worker (Mesh-enabled + Useful Commands)
-
-Workers now fully participate in the mesh with proper type + capabilities.
-"""
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("aurora-worker-mesh")
@@ -167,11 +159,27 @@ def main():
     prom.start_http_server(8000)
     logger.info(f"[MESH] Aurora Miner Worker started ({GPUS_PER_POD} GPU(s)) - joining comms mesh...")
 
-    comms.register_node(
-        node_type="worker",
-        capabilities=["gpu_mining", "intensity_control", "pause_resume", "restart"],
-        metadata={"gpus": GPUS_PER_POD, "pool": POOL_URL},
-    )
+    caps = ["gpu_mining", "intensity_control", "pause_resume", "restart"]
+    meta = {"gpus": GPUS_PER_POD, "pool": POOL_URL, "wallet": WALLET}
+    try:
+        from mods.btc_identity.identity import NodeIdentity
+        ident = NodeIdentity(comms)
+        view = ident.identity_view()
+        meta["btc_identity"] = {
+            "fingerprint": view.get("fingerprint"),
+            "address_style": view.get("address_style"),
+            "backend": view.get("backend"),
+        }
+        caps = caps + ["btc_identity"]
+        logger.info(f"[MESH] btc_identity fingerprint={view.get('fingerprint')}")
+        ident.register_with_identity(
+            capabilities=caps,
+            metadata={"gpus": GPUS_PER_POD, "pool": POOL_URL, "wallet": WALLET},
+        )
+    except Exception as e:
+        logger.debug(f"btc_identity optional: {e}")
+        comms.register_node(node_type="worker", capabilities=caps, metadata=meta)
+
     comms.heartbeat()
     comms.subscribe(f"node:{comms.node_id}", handle_mesh_command)
 
