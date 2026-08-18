@@ -3,41 +3,33 @@
 > **Aurora does not require every node to be trustworthy.
 > It requires every piece of state to be verifiable.**
 
-## Principle
+## Content layer
 
-Never trust a node’s statement about data. Trust independently verifiable content.
+- Manifests + Merkle verify-on-receive
+- Mesh challenges (claimed → verified)
+- PeerScore (crypto fail ≠ timeout)
+- Reed-Solomon erasure (`reed_solomon_v1`)
+- **Topology-aware redundancy** (site / power / network / rack)
+- **Repair planner** uses verified availability only
 
-## Content layer (no BFT consensus)
+## Availability rule
 
-- Cryptographic manifests + Merkle trees over pieces
-- Verify-on-receive (`torrent` v0.5 + `byzantine_receive`)
-- Mesh **challenges** for claimed possession (`asset.challenge`)
-- PeerScore: cryptographic failure ≠ timeout
-- Erasure coding foundation (`erasure.encode/decode`) — RS upgrade path
-- Repair from verified shards only (policy next)
+```text
+claimed holders  ≠  availability
+verified holders =  availability
 
-## Claimed vs verified
+if verified < policy or diversity floors miss:
+    plan_repair → place on nodes that add domains
+```
 
-| Kind | Meaning |
-|------|--------|
-| Claimed | Node asserts possession |
-| Verified | Survived receive-path verify or explicit challenge |
+## RS placement
 
-Replication accounting must use verified availability.
-
-## State layer (quorum only when needed)
-
-Authoritative versions, policy epochs, fleet config — not piece validity.
-
-## External attestation
-
-Bitcoin anchors selected roots (supply, registry, policy) — not bulk data.
+Important assets: `encode_important` → plan_rs_placement across domains →
+reconstruct only from verified shards.
 
 ## Roadmap
 
-1. ~~Verify-on-receive~~
-2. ~~Piece challenges~~
-3. ~~Erasure interface~~
-4. Topology-aware placement (failure domains)
-5. Verified-availability repair loop
-6. Epoch state roots → `btc_anchor`
+1. ~~Verify-on-receive / challenges / RS~~
+2. ~~Topology + verified repair planner~~
+3. Automatic redistribute executor (move bytes per plan)
+4. Epoch state roots → Bitcoin

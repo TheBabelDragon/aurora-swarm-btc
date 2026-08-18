@@ -5,42 +5,40 @@
 > Aurora does not require every node to be trustworthy.
 > It requires every piece of state to be verifiable.
 
-See [docs/BYZANTINE_DATA_PLANE.md](../../docs/BYZANTINE_DATA_PLANE.md).
-
-## Erasure coding (Reed-Solomon)
+## Topology + repair
 
 ```python
-from mods.asset_fabric.erasure import encode, decode, selftest
+from mods.asset_fabric.topology import NodeTopology, TopologyRegistry, publish_topology
+from mods.asset_fabric.repair import RepairPlanner, RedundancyPolicy, encode_important
+from mods.asset_fabric.possession_verify import PossessionTracker
 
-assert selftest()
+publish_topology(comms)  # AURORA_SITE / POWER / NETWORK / RACK
 
-enc = encode(data, n_data=4, n_parity=2)
-# enc["shards"] → distribute across failure domains
-# lose any 2 of 6 → still recovers
+possession = PossessionTracker()
+topo = TopologyRegistry()
+planner = RepairPlanner(possession, topo, RedundancyPolicy(
+    min_verified_holders=3,
+    min_power=2,
+    min_network=2,
+))
 
-shards = list(enc["shards"])
-shards[1] = None
-shards[5] = None
-out = decode(
-    shards,
-    n_data=enc["n_data"],
-    n_parity=enc["n_parity"],
-    shard_size=enc["shard_size"],
-    original_size=enc["original_size"],
-)
-assert out == data
+report = planner.availability(asset_id)
+# report.ok / report.deficits  — claimed is ignored; verified only
+
+plan = planner.plan_repair(asset_id, candidate_nodes)
+rs_plan = planner.plan_rs_placement(asset_id, candidate_nodes)
+enc = encode_important(data)  # RS shards for domain placement
 ```
 
-Code: **`reed_solomon_v1`** — systematic RS over GF(256), pure Python.  
-Constraint: `n_data + n_parity ≤ 255`.
-
-## Other modules
+## Modules
 
 | Module | Role |
 |--------|------|
 | `fabric` | publish / ensure / possession |
-| `merkle_pieces` | piece Merkle root + proofs |
-| `peer_evidence` | local PeerScore |
+| `merkle_pieces` | Merkle proofs |
+| `peer_evidence` | PeerScore |
 | `possession_verify` | claimed vs verified |
-| `challenge` | mesh piece challenges |
-| `erasure` | Reed-Solomon N+M shards |
+| `challenge` | mesh challenges |
+| `erasure` | Reed-Solomon N+M |
+| `topology` | failure domains |
+| `repair` | verified availability + placement plans |
