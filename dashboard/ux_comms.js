@@ -55,10 +55,13 @@
         if (u.source === "self") continue;
         var on = u.online ? "●" : "○";
         var id = esc(u.node_id);
+        var sel = chatTarget === u.node_id ? " style=\"background:#1a3a1a\"" : "";
         h +=
           '<div style="padding:4px 2px;cursor:pointer" class="chat-user" data-nid="' +
           id +
-          '"><span class="mono">' +
+          '"' +
+          sel +
+          '><span class="mono">' +
           on +
           " " +
           id +
@@ -67,10 +70,12 @@
           (u.from_ip ? " · " + esc(u.from_ip) : "") +
           "</div></div>";
       }
-      if (!users.filter(function (u) {
-        return u.source !== "self";
-      }).length)
-        h += '<div class="muted">No peers yet — Export join pack</div>';
+      if (
+        !users.filter(function (u) {
+          return u.source !== "self";
+        }).length
+      )
+        h += '<div class="muted">No peers yet — Export join pack / share Redis</div>';
       box.innerHTML = h;
       var nodes = box.querySelectorAll(".chat-user");
       for (var j = 0; j < nodes.length; j++) {
@@ -149,22 +154,27 @@
     var input = el("chat_text");
     var text = ((input && input.value) || "").trim();
     if (!text) return;
-    var fd = new FormData();
-    fd.append("text", text);
-    if (chatTarget) fd.append("to", chatTarget);
-    else fd.append("room", "swarm");
-    var d = await fetch("/comms/chat/send", { method: "POST", body: fd }).then(function (r) {
+    var body = { text: text, room: "swarm" };
+    if (chatTarget) body.to = chatTarget;
+    var d = await fetch("/comms/chat/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
       return r.json();
     });
     if (input) input.value = "";
     lastHistSig = "";
-    if (d.ok) refreshChatHistory();
-    else {
-      var o = el("comms_result");
+    var o = el("comms_result");
+    if (d.ok) {
       if (o) {
-        o.textContent = d.error || "send failed";
-        o.className = "error";
+        o.textContent = chatTarget ? "DM sent → " + chatTarget : "Sent to #swarm";
+        o.className = "success";
       }
+      refreshChatHistory();
+    } else if (o) {
+      o.textContent = d.error || "send failed";
+      o.className = "error";
     }
   };
 
