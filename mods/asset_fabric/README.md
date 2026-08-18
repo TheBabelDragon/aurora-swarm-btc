@@ -1,50 +1,38 @@
-# asset_fabric  v0.1.2
+# asset_fabric
 
 **Content-addressed swarm Asset Fabric**
+
+## Design principle
+
+> Aurora does not require every node to be trustworthy.
+> It requires every piece of state to be verifiable.
+
+See [docs/BYZANTINE_DATA_PLANE.md](../../docs/BYZANTINE_DATA_PLANE.md).
 
 ## Public verbs
 
 ```python
-from mods.asset_fabric.fabric import AssetFabric
-
-fabric = AssetFabric(comms)
-
-asset_id = fabric.publish("/path/to/model.pt", asset_type="model", anchor=True)
+fabric.publish(path)
 fabric.ensure(asset_id)
-
-# Local view
-print(fabric.possession(asset_id))
-
-# Swarm view — who holds this?
-print(fabric.swarm_possession(asset_id))
-# → { asset_id, holders: ["node-A", "node-B"], holder_count: 2 }
-
-# Advertise what this node holds (call periodically)
-fabric.publish_possession_snapshot()
+fabric.possession(asset_id)
+fabric.swarm_possession(asset_id)  # claimed holders (mesh snapshots)
 ```
 
-## Swarm possession
+## Byzantine foundation modules
 
-Each node writes a short-TTL snapshot:
+| Module | Role |
+|--------|------|
+| `merkle_pieces` | Piece Merkle root + inclusion proofs |
+| `peer_evidence` | Local PeerScore; crypto fail ≠ timeout |
+| `possession_verify` | Claimed vs challenge-verified possession |
 
-```
-asset:possession:<node_id> → { assets: [...], names: {...}, updated_at }
-```
+**Rule:** reputation ranks peers; hashes decide truth.
 
-`swarm_possession` / `list_swarm_assets` scan those keys.  
-This is the foundation for replication policy and “move compute toward data.”
+## Roadmap (content layer)
 
-## Layering
-
-```
-AssetFabric
-  ├── TorrentManager   (piece transport)
-  └── AssetAnchor      (optional attestation)
-         │
-         ▼
-  CommsLayer mesh  →  collective possession map
-```
-
-## Status
-
-v0.1.2 — ensure/publish/possession + swarm holder view. Still experimental (mods/).
+1. ~~Manifest + piece hashes~~
+2. Merkle proofs on piece receive ← foundation landed
+3. Wire torrent transport to reject invalid pieces + PeerScore
+4. Erasure coding (N+M) for important assets
+5. Topology-aware placement policy
+6. State-root attestation epochs → Bitcoin
