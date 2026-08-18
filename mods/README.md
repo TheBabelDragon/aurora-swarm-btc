@@ -8,13 +8,12 @@
 - `gpu_utilization_balancer` — Avoids highly utilized GPUs
 - `torrent_protocol` — Piece transport for Asset Fabric
 - `asset_fabric` — Content-addressed swarm assets
-- `btc_anchor` — Bitcoin attestation (commitments, Merkle batches, CLI/log writer)
+- `btc_anchor` — Bitcoin attestation
 - `btc_identity` — Bitcoin-style node identity
-- `ln_tips` — Lightning seeder tips (ledger + pluggable tipper)
+- `ln_tips` — Lightning seeder tips
+- `bvl` — **Babel Value Ledger** (mesh-native swarm credits)
 
 ## Direction
 
-Prefer `asset_fabric` for data-plane work.  
-`btc_anchor` for optional public attestation.  
-`btc_identity` for stable node labels.  
-`ln_tips` for soft incentives to seeders.
+`asset_fabric` for data · `btc_anchor` for attestation · `btc_identity` for labels ·  
+`bvl` for internal value · `ln_tips` for sat settlement of that value.

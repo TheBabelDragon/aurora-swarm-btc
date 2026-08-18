@@ -85,7 +85,7 @@ def status():
         "active_workers": len(workers) if workers else bus.get("worker_count", 0),
         "current_coin": bus.get("cluster:current_coin", "BTC"),
         "mood": "THEY YEARN FOR THE MINES" if entropy > 2.5 else "Patiently Hashing",
-        "message": "They do yearn. Mesh + Asset Fabric + Bitcoin attestation.",
+        "message": "They do yearn. Mesh + Asset Fabric + BVL + Bitcoin attestation.",
         "comms_nodes_registered": len(comms.get_active_nodes())
     }
 
@@ -340,17 +340,18 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px 6px;
 .progress-fill{background:#0a0;height:100%}
 </style></head><body>
 <h1>Aurora Swarm BTC — Operations Center</h1>
-<p><strong>Assets · attestation · broadcast · identity · mines</strong></p>
-<div class="card"><h2>Swarm Status</h2><div id="status">…</div><div id="btc_status" class="muted" style="margin-top:8px"></div></div>
+<p><strong>Assets · BVL · attestation · identity · mines</strong></p>
+<div class="card"><h2>Swarm Status</h2><div id="status">…</div><div id="btc_status" class="muted" style="margin-top:8px"></div><div id="bvl_status" class="muted" style="margin-top:6px"></div></div>
 <div class="card"><h2>Asset Transfer Manager</h2>
 <div id="torrent_summary" class="muted"></div>
 <div class="section"><input type="file" id="upload_file" style="width:auto"><input type="text" id="upload_name" placeholder="name"><label class="muted"><input type="checkbox" id="upload_anchor"> anchor</label>
-<button id="upload_btn" onclick="uploadAsset()">Upload &amp; Announce</button></div>
+<button id="upload_btn" onclick="uploadAsset()">Upload & Announce</button></div>
 <div class="section"><input type="text" id="ensure_infohash" placeholder="asset id"><button onclick="ensureAsset()">Ensure</button>
 <button onclick="forceAnnounce()">Announce</button></div>
 <div class="section"><button onclick="processBroadcasts()">Process queue</button>
 <button onclick="processBatched()">Process batched (Merkle)</button>
 <button onclick="registerIdentity()">Register identity</button>
+<button onclick="bvlRewardSeed()">BVL score holders</button>
 <span id="queue_stats" class="muted"></span></div>
 <div id="torrent_result" style="min-height:20px;margin:10px 0"></div>
 <div class="section"><h3>Downloading</h3><div id="downloading_list">None</div></div>
@@ -374,6 +375,9 @@ async function refresh(){try{
  document.getElementById('status').innerHTML=`<div class="metric">${s.active_workers} workers</div><p>Entropy ${s.entropy} · ${s.total_ths} TH/s · ${s.mood}</p>`;
  try{const b=await fetch('/btc/status').then(r=>r.json());
   document.getElementById('btc_status').innerHTML=`BTC: net=${b.network} broadcaster=${b.broadcaster} pending=${b.pending_broadcasts} wallet=${(b.mining_wallet||'').slice(0,12)}…`+(b.identity?` · id=${b.identity.fingerprint}`:'');
+ }catch(e){}
+ try{const v=await fetch('/bvl/status').then(r=>r.json());
+  if(v.status==='ok') document.getElementById('bvl_status').innerHTML=`BVL: balance=${v.balance} supply=${v.supply}`;
  }catch(e){}
  document.getElementById('nodes').innerText=JSON.stringify(await fetch('/nodes').then(r=>r.json()),null,2);
  document.getElementById('events').innerText=JSON.stringify(await fetch('/events?limit=8').then(r=>r.json()),null,2);
@@ -399,6 +403,8 @@ async function queueBroadcast(ih){const fd=new FormData();fd.append('infohash',i
 async function processBroadcasts(){const data=await fetch('/torrent/process_broadcasts',{method:'POST'}).then(r=>r.json());showT(data.status==='ok'?`Processed ${data.processed}`:(data.detail||'fail'),data.status==='ok');setTimeout(refreshTorrent,400)}
 async function processBatched(){const data=await fetch('/torrent/process_broadcasts_batched',{method:'POST'}).then(r=>r.json());showT(data.status==='ok'?`Batch ${data.count||0} root=${(data.root||'').slice(0,12)}`:(data.detail||'fail'),data.status==='ok');setTimeout(refreshTorrent,400)}
 async function registerIdentity(){const data=await fetch('/btc/identity/register',{method:'POST'}).then(r=>r.json());showT(data.status==='ok'?`Identity ${data.identity&&data.identity.fingerprint}`:(data.detail||'fail'),data.status==='ok');setTimeout(refresh,400)}
+async function bvlRewardSeed(){const ih=document.getElementById('ensure_infohash').value.trim();const fd=new FormData();if(ih)fd.append('asset_id',ih);
+const data=await fetch('/bvl/reward_seed',{method:'POST',body:fd}).then(r=>r.json());showT(data.ok||data.status==='ok'?`BVL scored`:(data.error||data.detail||'fail'),!!(data.ok||data.status==='ok'));setTimeout(refresh,400)}
 async function cancelTorrent(ih){const fd=new FormData();fd.append('infohash',ih);await fetch('/torrent/cancel',{method:'POST',body:fd});setTimeout(refreshTorrent,400)}
 async function sendBroadcast(action,factor=null){const fd=new FormData();fd.append('action',action);if(factor!=null)fd.append('factor',factor);fd.append('reason','dash');
 const data=await fetch('/command/broadcast',{method:'POST',body:fd}).then(r=>r.json());document.getElementById('command_result').innerText='✓ '+data.action}
@@ -407,6 +413,12 @@ const data=await fetch('/command/to_node/'+id,{method:'POST',body:fd}).then(r=>r
 refresh();setInterval(refresh,4000);
 </script></body></html>"""
     return HTMLResponse(content=html)
+
+try:
+    from bvl_ops import mount_bvl_ops
+    mount_bvl_ops(app, get_comms=lambda: comms)
+except Exception as _e:
+    logger.debug(f"bvl_ops not mounted: {_e}")
 
 try:
     from btc_ops import mount_btc_ops
