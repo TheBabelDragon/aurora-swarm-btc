@@ -203,6 +203,11 @@ def main():
                         HASH_RATE.set(round(gh, 2))
                         comms.publish_telemetry({"hashrate_ghs": round(gh, 2), "status": "mining"})
                         comms.set_state("worker:hashrate", round(gh, 2))
+                        comms.set_state(
+                            f"worker:{comms.node_id}:hashrate",
+                            {"hashrate_ghs": round(gh, 2), "ts": time.time(), "status": "mining"},
+                            expire=120,
+                        )
 
                     if "accepted" in line.lower():
                         SHARES_ACCEPTED.inc()
@@ -215,15 +220,21 @@ def main():
 
                     now = time.time()
                     if now - last_health_report > 30:
+                        gh_state = 0.0
+                        try:
+                            gh_state = float(comms.get_state("worker:hashrate") or 0)
+                        except Exception:
+                            pass
                         comms.heartbeat(
                             metadata={
                                 "status": "mining" if healthy else "degraded",
                                 "intensity": current_intensity,
+                                "hashrate_ghs": gh_state,
                             }
                         )
                         comms.publish_event(
                             "worker_heartbeat",
-                            {"healthy": healthy, "intensity": current_intensity},
+                            {"healthy": healthy, "intensity": current_intensity, "hashrate_ghs": gh_state},
                         )
                         last_health_report = now
 
