@@ -1,4 +1,4 @@
-"""Dashboard-local MiningEngine — always startable CPU path."""
+"""Dashboard-local MiningEngine — single source of truth for Start/Stop."""
 
 from __future__ import annotations
 
@@ -17,12 +17,14 @@ logger = logging.getLogger("aurora-dashboard.local_miner")
 
 _lock = threading.Lock()
 _engine = None
+# When user hits Stop, stay stopped until they hit Start (no silent restart)
+_user_stopped = False
 
 
 def _fmt(hs: float, running: bool) -> str:
     if running and hs <= 0:
         return "warming up…"
-    if not running and hs <= 0:
+    if not running:
         return "idle"
     if hs >= 1e12:
         return f"{hs/1e12:.3f} TH/s"
@@ -34,11 +36,15 @@ def _fmt(hs: float, running: bool) -> str:
         return f"{hs/1e3:.2f} KH/s"
     if hs > 0:
         return f"{hs:.0f} H/s"
-    return "measuring…" if running else "idle"
+    return "warming up…"
 
 
 def wallet_configured() -> str:
     return (os.getenv("MINING_WALLET") or DEFAULT_MINING_WALLET).strip()
+
+
+def is_user_stopped() -> bool:
+    return bool(_user_stopped)
 
 
 def get_local_engine(comms: Any):
@@ -62,7 +68,27 @@ def get_local_engine(comms: Any):
         return _engine
 
 
+def _publish_stopped(comms: Any, eng: Any):
+    """Force Redis + status readers to see stopped — no stale RUNNING."""
+    try:
+        nid = getattr(comms, "node_id", "dashboard")
+        payload = {
+            "hashrate_hs": 0.0,
+            "hashrate_display": "idle",
+            "running": False,
+            "status": "stopped",
+            "backend": getattr(getattr(eng, "backend", None), "kind", "cpu_stratum"),
+        }
+        comms.set_state(f"worker:{nid}:hashrate", payload, expire=120)
+        # do not wipe cluster total — other nodes may still mine
+    except Exception as e:
+        logger.debug(f"publish stopped: {e}")
+
+
 def start_local(comms: Any) -> dict:
+    global _user_stopped
+    with _lock:
+        _user_stopped = False
     wallet = wallet_configured()
     eng = get_local_engine(comms)
     ok = eng.start()
@@ -79,63 +105,53 @@ def start_local(comms: Any) -> dict:
         "running": running,
         "hashrate_display": _fmt(hs, running),
         "hashrate_hs": hs,
-        "error": st.get("error"),
+        "error": st.get("error") or "",
+        "user_stopped": False,
         "status": st,
     }
 
 
 def stop_local(comms: Any) -> dict:
+    global _user_stopped
+    with _lock:
+        _user_stopped = True
     eng = get_local_engine(comms)
     eng.stop()
+    _publish_stopped(comms, eng)
     st = eng.status()
-    return {"ok": True, "running": False, "status": st, "backend": st.get("backend"), "hashrate_display": "idle"}
+    # Force running false even if backend lag
+    return {
+        "ok": True,
+        "mode": "local_engine",
+        "backend": st.get("backend"),
+        "running": False,
+        "hashrate_display": "idle",
+        "hashrate_hs": 0.0,
+        "error": st.get("error") or "",
+        "user_stopped": True,
+        "status": {**st, "running": False, "hashrate_hs": 0.0, "hashrate_display": "idle"},
+    }
 
 
 def local_status(comms: Any) -> dict:
-    wallet = wallet_configured()
-    eng = None
-    with _lock:
-        eng = _engine
-    if eng is None:
-        return {
-            "wallet": wallet,
-            "pool": os.getenv("POOL_URL", DEFAULT_POOL_URL),
-            "backend": "cpu_stratum",
-            "backend_available": True,
-            "running": False,
-            "engine_built": False,
-            "hashrate_hs": 0.0,
-            "hashrate_ghs": 0.0,
-            "hashrate_display": "idle",
-            "error": "",
-        }
+    """Authoritative local mining status — used by every panel."""
+    eng = get_local_engine(comms)
     st = eng.status()
     hs = float(st.get("hashrate_hs") or 0)
-    running = bool(st.get("running"))
-    # publish for mesh
-    try:
-        comms.set_state(
-            f"worker:{comms.node_id}:hashrate",
-            {
-                "hashrate_hs": hs,
-                "hashrate_display": _fmt(hs, running),
-                "running": running,
-                "backend": st.get("backend"),
-            },
-            expire=90,
-        )
-    except Exception:
-        pass
+    running = bool(st.get("running")) and not _user_stopped
+    if _user_stopped:
+        running = False
+        hs = 0.0
     return {
-        "wallet": wallet,
-        "pool": eng.cfg.pool_url,
-        "backend": st.get("backend") or "cpu_stratum",
-        "backend_available": True,
-        "running": running,
+        "ok": True,
         "engine_built": True,
-        "hashrate_hs": hs,
-        "hashrate_ghs": hs / 1e9,
-        "hashrate_display": _fmt(hs, running),
+        "backend": st.get("backend") or "cpu_stratum",
+        "wallet": eng.cfg.wallet,
+        "pool": eng.cfg.pool_url,
+        "running": running,
+        "user_stopped": bool(_user_stopped),
+        "hashrate_hs": hs if running else 0.0,
+        "hashrate_display": _fmt(hs if running else 0.0, running),
         "error": st.get("error") or "",
-        **{k: v for k, v in st.items() if k not in ("hashrate_display",)},
+        "status": st,
     }

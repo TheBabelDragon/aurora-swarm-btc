@@ -92,39 +92,44 @@ function fetchTimeout(url, ms, opts){
 document.getElementById('chat_text').addEventListener('keydown', function(e){ if(e.key==='Enter') chatSend(); });
 function showT(m,ok){ var e=document.getElementById('torrent_msg'); if(e){ e.textContent=m; e.className=ok?'success':'error'; } }
 
+/* Single source: /mining/engine/status for BOTH Mining card and Status mining line */
+async function fetchMineTruth(){
+  return await fetchTimeout('/mining/engine/status', 6000).then(function(r){ return r.json(); });
+}
+
 async function refreshMine(){
   var box = document.getElementById('mine_status');
   if(!box) return;
   try{
-    var d = await fetchTimeout('/mining/engine/status', 6000).then(function(r){ return r.json(); });
-    if(!d.ok && d.error){
-      box.className = 'error';
-      box.innerHTML = '<strong>Miner error</strong> · '+d.error;
-      return;
-    }
-    var rate = d.hashrate_display || 'idle';
-    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = d.running ? 'measuring…' : 'idle';
-    box.className = d.running ? 'success' : 'muted';
+    var d = await fetchMineTruth();
+    var running = !!d.running;
+    var rate = d.hashrate_display || (running ? 'warming up…' : 'idle');
+    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = running ? 'warming up…' : 'idle';
+    box.className = running ? 'success' : 'muted';
     var err = d.error ? (' · <span class="error">'+d.error+'</span>') : '';
     box.innerHTML =
-      '<strong>'+(d.running?'RUNNING':'STOPPED')+'</strong> · <span class="metric" style="font-size:1.2em">'+rate+'</span><br>'+
-      '<span class="muted">'+(d.backend||'?')+' · pool '+(d.pool||'')+'</span>'+err;
+      '<strong>'+(running?'RUNNING':'STOPPED')+'</strong> · <span class="metric" style="font-size:1.2em">'+rate+'</span><br>'+
+      '<span class="muted">'+(d.backend||'cpu')+' · '+(d.pool||'')+'</span>'+err;
   }catch(e){
     box.className = 'error';
-    box.textContent = 'Mining status unreachable — container may be restarting';
+    box.textContent = 'Mining status unreachable';
   }
 }
 
 async function refresh(){
+  var mine = null;
+  try{ mine = await fetchMineTruth(); }catch(e){ mine = null; }
   try{
     var s = await fetchTimeout('/status', 8000).then(function(r){ return r.json(); });
-    var rate = s.hashrate_display || (s.mining && s.mining.hashrate_display) || 'idle';
-    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = (s.mining && s.mining.running) ? 'measuring…' : 'idle';
     var m = s.mining || {};
+    /* Prefer live engine endpoint so Status never contradicts Mining */
+    var running = mine ? !!mine.running : !!m.running;
+    var rate = mine ? (mine.hashrate_display || (running?'warming up…':'idle')) : (m.hashrate_display || 'idle');
+    if(rate==='0 H/s' || rate==='0.0 GH/s') rate = running ? 'warming up…' : 'idle';
     document.getElementById('status').innerHTML =
-      '<div class="metric">'+(s.active_workers||0)+' workers</div>'+
+      '<div class="metric">'+(running?'RUNNING':'STOPPED')+'</div>'+
       '<p><strong>'+rate+'</strong> · '+(s.mood||'')+'</p>'+
-      '<p class="muted">'+(m.hashrate_display||'idle')+(m.running?' · running':' · stopped')+'</p>';
+      '<p class="muted">this node only · fleet '+(s.fleet_hashrate_display||'—')+'</p>';
     try{
       var g = await fetchTimeout('/comms/global', 6000).then(function(r){ return r.json(); });
       var b = g.bvl || {};
@@ -141,22 +146,34 @@ async function refresh(){
   }catch(e){
     document.getElementById('status').innerHTML = '<span class="error">Status unreachable</span>';
   }
-  refreshMine();
+  if(mine){
+    var box = document.getElementById('mine_status');
+    if(box){
+      var running = !!mine.running;
+      var rate = mine.hashrate_display || (running?'warming up…':'idle');
+      box.className = running ? 'success' : 'muted';
+      box.innerHTML =
+        '<strong>'+(running?'RUNNING':'STOPPED')+'</strong> · <span class="metric" style="font-size:1.2em">'+rate+'</span><br>'+
+        '<span class="muted">'+(mine.backend||'cpu')+' · '+(mine.pool||'')+'</span>';
+    }
+  } else {
+    refreshMine();
+  }
 }
 async function startLocalMine(){
   showT('Starting…', true);
   try{
     var d=await fetchTimeout('/mining/engine/start',20000,{method:'POST'}).then(function(r){return r.json();});
-    var msg = d.already ? ('Already running · '+(d.hashrate_display||'')) :
-              (d.ok ? ('Mining '+(d.hashrate_display||'on')) : (d.error||'fail'));
-    showT(msg, !!d.ok);
-    refreshMine(); refresh();
+    showT(d.ok?('Start ok · '+(d.hashrate_display||'')):(d.error||'fail'), !!d.ok);
+    await refresh();
   }catch(e){ showT('start timeout', false); }
 }
 async function stopLocalMine(){
+  showT('Stopping…', true);
   try{
-    await fetchTimeout('/mining/engine/stop',10000,{method:'POST'});
-    showT('stopped', true); refreshMine(); refresh();
+    var d=await fetchTimeout('/mining/engine/stop',10000,{method:'POST'}).then(function(r){return r.json();});
+    showT('STOPPED', true);
+    await refresh();
   }catch(e){ showT('stop timeout', false); }
 }
 async function nccRefreshNodes(){
@@ -210,8 +227,7 @@ async function runSelftest(){
     if(box) box.innerHTML=h;
   }catch(e){ if(box) box.textContent='timeout'; }
 }
-refresh(); refreshMine();
-setInterval(refresh, 4000);
-setInterval(refreshMine, 2000);
+refresh();
+setInterval(refresh, 3000);
 </script>
 </body></html>

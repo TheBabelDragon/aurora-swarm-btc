@@ -1,4 +1,4 @@
-"""Start mining once at boot — no thrash loop."""
+"""Boot mining once — never overrides a user Stop."""
 
 from __future__ import annotations
 
@@ -23,24 +23,25 @@ def start_auto_mine(get_comms: Callable[[], Any], delay: float = 3.0):
     def _run():
         time.sleep(delay)
         try:
-            from dashboard.local_miner import local_status, start_local
+            from dashboard.local_miner import is_user_stopped, local_status, start_local
 
+            if is_user_stopped():
+                logger.info("auto-mine skipped — user stopped")
+                return
             comms = get_comms()
             st = local_status(comms)
             if st.get("running"):
-                logger.info("auto-mine: already running display=%s", st.get("hashrate_display"))
+                logger.info("auto-mine: already running")
                 return
             out = start_local(comms)
             logger.info(
-                "auto-mine ok=%s backend=%s running=%s display=%s err=%s",
+                "auto-mine ok=%s running=%s display=%s",
                 out.get("ok"),
-                out.get("backend"),
                 out.get("running"),
                 out.get("hashrate_display"),
-                out.get("error"),
             )
         except Exception as e:
             logger.warning(f"auto-mine failed: {e}")
 
     threading.Thread(target=_run, name="auto-mine", daemon=True).start()
-    logger.info("auto-mine scheduled (single attempt)")
+    logger.info("auto-mine scheduled (single attempt, respects Stop)")
