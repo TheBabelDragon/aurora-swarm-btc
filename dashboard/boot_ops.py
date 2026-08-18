@@ -1,4 +1,4 @@
-"""Mount ops + truthful status + fleet/transfer + mining engine; start BVL economy."""
+"""Mount ops + live status + mining + BVL economy."""
 from __future__ import annotations
 
 import logging
@@ -15,6 +15,7 @@ def boot(
     get_anchor: Optional[Callable[[], Any]] = None,
     get_identity: Optional[Callable[[], Any]] = None,
     get_fabric: Optional[Callable[[], Any]] = None,
+    bus: Any = None,
 ):
     if getattr(app.state, "aurora_booted", False):
         return
@@ -71,6 +72,14 @@ def boot(
         install_mining_engine_ops(app, get_comms=get_comms)
     except Exception as e:
         logger.warning(f"mining_engine_ops: {e}")
+
+    try:
+        from dashboard.status_live import install_status_live
+
+        # bus optional — pass from run.py if available
+        install_status_live(app, get_comms=get_comms, bus=bus)
+    except Exception as e:
+        logger.warning(f"status_live: {e}")
 
     try:
         from mods.bvl.economy import start_economy
