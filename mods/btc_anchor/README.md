@@ -1,32 +1,21 @@
-# btc_anchor  v0.3.0
+# btc_anchor  v0.3.1
 
 **Bitcoin attestation for Asset Fabric**
 
-## Pipeline
+## Broadcasters
 
-```
-Manifest → commitment → mesh record → queue
-                              ↓
-                    single OP_RETURN  or  Merkle batch root
-                              ↓
-                         Broadcaster (log | null | wallet)
-                              ↓
-                      mark_broadcast(txid)
-```
+| Mode | Env | Behavior |
+|------|-----|----------|
+| null | default | no-op |
+| log | `AURORA_BTC_BROADCASTER=log` | builds OP_RETURN, logs, synthetic txid |
+| cli | `AURORA_BTC_BROADCASTER=cli` | bitcoin-cli path; dry-run unless `AURORA_BTC_CLI_SEND=1` |
 
-## Payloads
+CLI send path: `createrawtransaction` (data) → `fundrawtransaction` → `signrawtransactionwithwallet` → `sendrawtransaction`.
 
-| Form | Bytes | Content |
-|------|-------|--------|
-| Single | `AURORA1\|xxxxxxxxxxxxxxxx` | commitment prefix |
-| Batch | `AURORA1B\|rootprefix\|N` | Merkle root prefix + count |
-
-## API
+## Batch
 
 ```python
-anchor.anchor_manifest(manifest, request_broadcast=True)
-anchor.process_queue()           # one-by-one
-anchor.process_queue_batched()   # Merkle root, one write for many assets
+anchor.process_queue_batched()  # Merkle root, one write, proofs on each record
 ```
 
 ## Verify
@@ -34,7 +23,3 @@ anchor.process_queue_batched()   # Merkle root, one write for many assets
 ```python
 from mods.btc_anchor.verify import verify_commitment, verify_op_return_prefix, verify_merkle_inclusion
 ```
-
-## Config
-
-`AURORA_BTC_BROADCASTER=log|null`  ·  `AURORA_BTC_NETWORK=signet|testnet|mainnet`  ·  `AURORA_BTC_ANCHOR_BROADCAST=1`
