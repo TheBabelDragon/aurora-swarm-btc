@@ -1,8 +1,9 @@
-"""Dashboard routes for Babel Value Ledger."""
+"""Dashboard routes for Babel Value Ledger — read + transfer, no open mint."""
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable
 
 from fastapi import FastAPI, Form
@@ -31,24 +32,8 @@ def mount_bvl_ops(app: FastAPI, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return {"items": [], "error": str(e)}
 
-    @app.post("/bvl/reward_seed")
-    async def bvl_reward_seed(asset_id: str = Form(""), node_id: str = Form(None)):
-        try:
-            bvl = _ledger()
-            if node_id and node_id.strip():
-                return bvl.reward_seed(node_id.strip(), asset_id=asset_id.strip())
-            if asset_id.strip():
-                return {"status": "ok", "results": bvl.score_holders(asset_id.strip())}
-            return bvl.reward_seed(asset_id=asset_id.strip())
-        except Exception as e:
-            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
-
-    @app.post("/bvl/reward_attest")
-    async def bvl_reward_attest(asset_id: str = Form("")):
-        try:
-            return _ledger().reward_attest(asset_id=asset_id.strip())
-        except Exception as e:
-            return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+    # NOTE: /bvl/reward_seed and /bvl/reward_attest intentionally removed.
+    # Minting is performed only by EconomyReactor on verified swarm events.
 
     @app.post("/bvl/transfer")
     async def bvl_transfer(to_node: str = Form(...), amount: float = Form(...), memo: str = Form("")):
@@ -78,4 +63,26 @@ def mount_bvl_ops(app: FastAPI, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
-    logger.info("bvl_ops routes mounted")
+    @app.post("/bvl/genesis")
+    async def bvl_genesis():
+        """One-time bootstrap only when explicitly enabled and supply is zero."""
+        if os.getenv("AURORA_BVL_ALLOW_GENESIS", "").lower() not in ("1", "true", "yes"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "open mint disabled — set AURORA_BVL_ALLOW_GENESIS=1 for one-time bootstrap only",
+                },
+                status_code=403,
+            )
+        try:
+            led = _ledger()
+            if led.supply() > 0:
+                return JSONResponse(
+                    {"ok": False, "error": "genesis already used (supply > 0)", "supply": led.supply()},
+                    status_code=409,
+                )
+            return led.reward_seed(led.node_id, asset_id="genesis", amount=None, force_system=True)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    logger.info("bvl_ops routes mounted (no open mint)")

@@ -1,36 +1,33 @@
-# bvl  v0.1.1 — Babel Value Ledger
+# BVL — Babel Value Ledger
 
-**Mesh-native swarm credits for Aurora**
+Mesh credit for **useful swarm work**. Not printable from a terminal.
 
-```text
-Work on the mesh  →  BVL mint  →  optional sats (ln_tips)
-                      ↓
-              optional supply attestation (btc_anchor)
-```
+## How BVL is created
 
-## Live economy
+Only the **EconomyReactor** (and other system hooks) mint:
 
-```python
-from mods.bvl.economy import start_economy
+| Event | Reward |
+|-------|--------|
+| `asset.complete` | `seed_hold` to completing node |
+| `asset.anchored` | `attest` to anchoring node |
+| uptime tick (system) | small `uptime` credit |
 
-reactor = start_economy(comms)
-# asset.complete  → seed reward
-# asset.anchored  → attest reward
+Each `(reason, node_id, asset_id)` claim is granted **at most once**.
 
-reactor.pulse_uptime()     # call from worker loop
-reactor.attest_supply()    # commit supply snapshot (mesh + optional BTC anchor)
-```
+## What HTTP can do
 
-## Manual API (still available)
+| Endpoint | Allowed |
+|----------|---------|
+| `GET /bvl/status` | read |
+| `GET /bvl/ledger` | read |
+| `POST /bvl/transfer_safe` | move existing balance (confirm recipient) |
+| `POST /bvl/settle` | burn → optional sats bridge |
+| `POST /bvl/genesis` | **only** if `AURORA_BVL_ALLOW_GENESIS=1` **and** supply is 0 |
 
-```python
-from mods.bvl.ledger_service import BabelLedger
-bvl = BabelLedger(comms)
-bvl.score_holders(asset_id)
-bvl.transfer("worker-02", 5.0)
-bvl.settle_to_sats(3.0)
-```
+There is **no** public `/bvl/reward_seed` anymore.
 
-## Status
+## Earn for real
 
-v0.1.1 — live reactor + supply attestation hook. Experimental (mods/).
+1. Upload & complete an asset on the mesh → `asset.complete` → seed credit  
+2. Anchor an asset → `asset.anchored` → attest credit  
+3. Transfer only moves what was earned  
