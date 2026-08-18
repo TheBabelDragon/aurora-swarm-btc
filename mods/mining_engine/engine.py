@@ -1,7 +1,4 @@
-"""
-MiningEngine — tandem brain around a hasher.
-Backend: bfgminer if present, else pure-Python stratum CPU (always available).
-"""
+"""MiningEngine — tandem brain; multi-coin aware."""
 
 from __future__ import annotations
 
@@ -24,6 +21,7 @@ class MiningEngine:
     def __init__(self, comms: Any, **kwargs):
         self.comms = comms
         self.worker_id = kwargs.get("worker_id") or comms.node_id
+        coin = (kwargs.get("coin") or os.getenv("AURORA_MINE_COIN", "BTC")).upper()
         self.cfg = MinerConfig(
             pool_url=kwargs.get("pool_url") or os.getenv("POOL_URL", DEFAULT_POOL_URL),
             wallet=kwargs.get("wallet")
@@ -34,6 +32,8 @@ class MiningEngine:
             gpus=int(kwargs.get("gpus") or os.getenv("GPUS_PER_POD", "1")),
             binary=kwargs.get("binary") or os.getenv("BFGMINER_BIN", "bfgminer"),
             cpu_threads=int(kwargs.get("cpu_threads") or os.getenv("AURORA_CPU_THREADS", "0") or 0),
+            coin=coin,
+            comms=comms,
         )
         self.backend = select_backend(self.cfg)
         self.pipeline = SharePipeline(
@@ -48,7 +48,6 @@ class MiningEngine:
         self.paused = False
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        # Adaptive intensity only meaningful for bfgminer GPU path
         self._adaptive_enabled = (
             getattr(self.backend, "kind", "") == "bfgminer"
             and os.getenv("AURORA_MINING_ADAPTIVE", "1") not in ("0", "false", "no")
@@ -67,6 +66,7 @@ class MiningEngine:
                 "pool": self.cfg.pool_url,
                 "wallet": self.cfg.wallet,
                 "backend": getattr(self.backend, "kind", "unknown"),
+                "coin": self.cfg.coin,
             },
         )
 
@@ -105,6 +105,7 @@ class MiningEngine:
             "pool": self.cfg.pool_url,
             "wallet": self.cfg.wallet,
             "wallet_set": bool(self.cfg.wallet),
+            "coin": self.cfg.coin,
             "backend": getattr(self.backend, "kind", "unknown"),
             "backend_available": self.backend.available(),
             "adaptive": self._adaptive_enabled,
@@ -142,10 +143,9 @@ class MiningEngine:
                     thermal = self.adaptive.thermal_hint_from_comms(self.comms)
                     nxt = self.adaptive.suggest(int(float(self.cfg.intensity)), thermal_scale=thermal)
                     if str(nxt) != str(self.cfg.intensity):
-                        logger.info(f"adaptive intensity {self.cfg.intensity} → {nxt}")
                         self.set_intensity(str(nxt))
-                except Exception as e:
-                    logger.debug(f"adaptive: {e}")
+                except Exception:
+                    pass
 
             try:
                 self.comms.heartbeat(
@@ -154,6 +154,7 @@ class MiningEngine:
                         "intensity": self.cfg.intensity,
                         "hashrate_ghs": self.pipeline.last_hashrate_ghs,
                         "backend": getattr(self.backend, "kind", "unknown"),
+                        "coin": self.cfg.coin,
                     }
                 )
             except Exception:

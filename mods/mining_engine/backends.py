@@ -7,8 +7,8 @@ import os
 import queue
 import shutil
 import subprocess
-from dataclasses import dataclass
-from typing import List, Optional, TextIO
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, TextIO
 
 logger = logging.getLogger("aurora.mining.backend")
 
@@ -21,7 +21,9 @@ class MinerConfig:
     intensity: str = "19"
     gpus: int = 1
     binary: str = "bfgminer"
-    cpu_threads: int = 0  # 0 = auto
+    cpu_threads: int = 0
+    coin: str = "BTC"
+    comms: Any = field(default=None, repr=False)
 
 
 class BfgminerBackend:
@@ -96,8 +98,6 @@ class BfgminerBackend:
 
 
 class _QueueReader:
-    """File-like readline() over a queue.Queue of text lines."""
-
     def __init__(self, q: queue.Queue):
         self.q = q
 
@@ -109,8 +109,6 @@ class _QueueReader:
 
 
 class CpuStratumBackend:
-    """Always available — pure Python stratum + CPU SHA256d."""
-
     def __init__(self, cfg: MinerConfig):
         self.cfg = cfg
         self.kind = "cpu_stratum"
@@ -136,10 +134,12 @@ class CpuStratumBackend:
             password="x",
             threads=threads,
             line_queue=self._q,
+            comms=self.cfg.comms,
+            coin=self.cfg.coin or "BTC",
         )
         ok = self._miner.start()
         if ok:
-            logger.info(f"CPU stratum backend started user={user[:20]}… threads={threads}")
+            logger.info(f"CPU stratum started user={user[:24]}… coin={self.cfg.coin}")
         return ok
 
     def stop(self, timeout: float = 10.0):
@@ -154,7 +154,6 @@ class CpuStratumBackend:
         return self._reader
 
     def set_intensity(self, intensity: str):
-        # Map intensity 14–20 → thread count nudge
         self.cfg.intensity = str(intensity)
         try:
             i = int(float(intensity))
@@ -164,7 +163,6 @@ class CpuStratumBackend:
 
 
 def select_backend(cfg: MinerConfig):
-    """Prefer bfgminer; always fall back to CPU stratum."""
     prefer = (os.getenv("AURORA_MINER_BACKEND") or "auto").lower()
     if prefer == "cpu":
         return CpuStratumBackend(cfg)
