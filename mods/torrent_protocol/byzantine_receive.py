@@ -2,8 +2,7 @@
 Byzantine verify-on-receive for TorrentManager.
 
 Wraps _on_piece_data so invalid pieces never enter local state.
-Soft-imports asset_fabric helpers; no-ops if unavailable.
-Also attaches PieceChallenger for claimed→verified possession.
+Also attaches PieceChallenger, topology publish, and RepairPlanner.
 """
 
 from __future__ import annotations
@@ -155,7 +154,6 @@ def attach_byzantine_receive(manager: Any) -> bool:
 
     manager._assemble_and_finish = assemble_wrapped  # type: ignore
 
-    # Mesh challenges for claimed possession
     try:
         from mods.asset_fabric.challenge import PieceChallenger
 
@@ -188,6 +186,28 @@ def attach_byzantine_receive(manager: Any) -> bool:
         logger.info(f"PieceChallenger attached on {manager.node_id}")
     except Exception as e:
         logger.debug(f"PieceChallenger not attached: {e}")
+
+    # Topology + verified repair planner
+    try:
+        from mods.asset_fabric.topology import TopologyRegistry, publish_topology, load_topology_from_mesh
+        from mods.asset_fabric.repair import RepairPlanner, RedundancyPolicy
+
+        topo = publish_topology(manager.comms)
+        registry = TopologyRegistry()
+        registry.upsert(topo)
+        load_topology_from_mesh(manager.comms, registry)
+        manager.topology = registry
+        manager.repair_planner = RepairPlanner(
+            manager.possession,
+            registry,
+            RedundancyPolicy(),
+        )
+        logger.info(
+            f"Topology published site={topo.site} power={topo.power} "
+            f"net={topo.network} rack={topo.rack}"
+        )
+    except Exception as e:
+        logger.debug(f"topology/repair not attached: {e}")
 
     logger.info(f"Byzantine verify-on-receive attached on {manager.node_id}")
     return True
