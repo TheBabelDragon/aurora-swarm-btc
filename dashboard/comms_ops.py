@@ -1,4 +1,4 @@
-"""Comms Layer — mesh status, discovery, export, live chat (Form + JSON)."""
+"""Comms Layer — status, discovery, export, chat, mesh join."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ def _redact_redis(url: str) -> str:
 
 
 def _fmt(hs: float) -> str:
+    if hs <= 0:
+        return "idle"
     if hs >= 1e12:
         return f"{hs/1e12:.3f} TH/s"
     if hs >= 1e9:
@@ -44,7 +46,7 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         comms = get_comms()
         redis_ok = False
         try:
-            redis_ok = bool(comms.ping()) if hasattr(comms, "ping") else bool(comms.r.ping())
+            redis_ok = bool(comms.ping())
         except Exception:
             redis_ok = False
         peers = []
@@ -61,9 +63,9 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
                 try:
                     st = comms.get_state(f"worker:{nid}:hashrate")
                     if isinstance(st, dict):
-                        hs = st.get("hashrate_hs") or float(st.get("hashrate_ghs") or 0) * 1e9
+                        hs = st.get("hashrate_hs") or 0
                 except Exception:
-                    hs = None
+                    hs = 0
             if hs:
                 total_hs += float(hs)
         lan = []
@@ -78,7 +80,8 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         return {
             "status": "ok",
             "redis_ok": redis_ok,
-            "redis_url": _redact_redis(getattr(comms, "redis_url", "") or os.getenv("REDIS_URL", "")),
+            "redis_url": _redact_redis(getattr(comms, "redis_url", "") or ""),
+            "redis_url_raw": getattr(comms, "redis_url", "") or "",
             "node_id": comms.node_id,
             "peer_count": len(peers),
             "peers": peers,
@@ -89,6 +92,22 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             "discovery_port": int(os.getenv("AURORA_DISCOVERY_PORT", "7379") or 7379),
             "ts": time.time(),
         }
+
+    @app.post("/comms/join_mesh")
+    async def join_mesh(redis_url: str = Form("")):
+        """Join shared LAN Redis — empty url = auto pick leader from discovery."""
+        try:
+            from comms.mesh_join import try_join_mesh
+
+            ru = (redis_url or "").strip()
+            if ru:
+                import os as _os
+
+                _os.environ["AURORA_MESH_REDIS"] = ru
+            out = try_join_mesh(get_comms(), force=True)
+            return out
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.get("/comms/export")
     def comms_export():
@@ -210,7 +229,6 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
 
     @app.post("/comms/chat/send")
     async def chat_send(request: Request):
-        """Accept form-urlencoded OR JSON so DM never silently fails."""
         try:
             text = ""
             to_n = None
@@ -252,4 +270,4 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return {"items": [], "error": str(e)}
 
-    logger.info("comms_ops mounted (chat+export+discovery)")
+    logger.info("comms_ops mounted (chat+join_mesh+export)")
