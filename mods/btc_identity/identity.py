@@ -57,18 +57,31 @@ class NodeIdentity:
             "ts": claim["ts"],
         }
         try:
+            existing = []
+            try:
+                prev = self.comms.get_state(f"node:{self.node_id}") or {}
+                if isinstance(prev, dict):
+                    existing = list(prev.get("capabilities") or [])
+                    # keep prior metadata keys (e.g. torrent_version) unless overwritten
+                    for k, v in (prev.get("metadata") or {}).items():
+                        meta.setdefault(k, v)
+            except Exception:
+                pass
+            # Always union — never wipe torrent/dashboard/etc.
+            caps = list(dict.fromkeys(existing + list(capabilities or []) + ["btc_identity"]))
+            if self.node_id == "dashboard" and "dashboard" not in caps:
+                caps.append("dashboard")
             self.comms.register_node(
                 node_type="worker",
-                capabilities=list(capabilities or []) + ["btc_identity"],
+                capabilities=caps,
                 metadata=meta,
             )
-            # Persist claim on mesh for discovery
             self.comms.set_state(
                 f"node:identity:{self.node_id}",
                 meta["btc_identity"],
                 expire=600,
             )
-            logger.info(f"Registered identity for {self.node_id}")
+            logger.info(f"Registered identity for {self.node_id} caps={caps}")
         except Exception as e:
             logger.warning(f"register_with_identity failed: {e}")
 
