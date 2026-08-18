@@ -1,8 +1,6 @@
 """
 Aurora miner worker — mesh node driving MiningEngine + bfgminer.
-
-GPU hashing: bfgminer OpenCL
-Swarm brain: mods.mining_engine (shares → provenance, adaptive intensity, fleet)
+Default wallet: bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g (override with MINING_WALLET).
 """
 
 from __future__ import annotations
@@ -20,6 +18,7 @@ if str(_ROOT) not in sys.path:
 
 import prometheus_client as prom
 from comms.layer import CommsLayer
+from mods.mining_engine.defaults import DEFAULT_MINING_WALLET, DEFAULT_POOL_URL
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("aurora-worker-mesh")
@@ -34,14 +33,18 @@ HEALTH = prom.Gauge("aurora_worker_health", "Health status")
 engine = None
 
 
+def _wallet() -> str:
+    return (os.getenv("MINING_WALLET") or DEFAULT_MINING_WALLET).strip()
+
+
 def _build_engine():
     from mods.mining_engine.engine import MiningEngine
 
     eng = MiningEngine(
         comms,
         worker_id=os.getenv("WORKER_NAME", comms.node_id),
-        pool_url=os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333"),
-        wallet=os.getenv("MINING_WALLET", ""),
+        pool_url=os.getenv("POOL_URL", DEFAULT_POOL_URL),
+        wallet=_wallet(),
         intensity=os.getenv("INTENSITY", "19"),
         gpus=int(os.getenv("GPUS_PER_POD", "1")),
         facility_domain=os.getenv("FACILITY_DOMAIN", "unknown"),
@@ -50,8 +53,9 @@ def _build_engine():
 
     def on_hr(gh: float):
         HASH_RATE.set(gh)
+        eng._on_hashrate(gh)
 
-    eng.pipeline.on_hashrate = lambda gh: (on_hr(gh), eng._on_hashrate(gh))
+    eng.pipeline.on_hashrate = on_hr
     return eng
 
 
@@ -101,13 +105,13 @@ def main():
     signal.signal(signal.SIGTERM, shutdown_handler)
 
     prom.start_http_server(int(os.getenv("WORKER_METRICS_PORT", "9100")))
-    logger.info("[MESH] MiningEngine worker joining…")
+    logger.info(f"[MESH] MiningEngine worker joining… wallet={_wallet()[:12]}…")
 
     caps = ["gpu_mining", "intensity_control", "pause_resume", "restart", "mining_engine"]
     meta = {
         "gpus": int(os.getenv("GPUS_PER_POD", "1")),
-        "pool": os.getenv("POOL_URL", ""),
-        "wallet": os.getenv("MINING_WALLET", ""),
+        "pool": os.getenv("POOL_URL", DEFAULT_POOL_URL),
+        "wallet": _wallet(),
     }
     try:
         from mods.btc_identity.identity import NodeIdentity
@@ -120,7 +124,6 @@ def main():
 
     comms.heartbeat()
     try:
-        # mesh command channels used by dashboard broadcast
         from comms.layer import SwarmMessage
 
         def _wrap(msg: SwarmMessage):
@@ -132,8 +135,6 @@ def main():
         logger.warning(f"subscribe: {e}")
 
     engine = _build_engine()
-    if not engine.cfg.wallet:
-        logger.warning("MINING_WALLET empty — miner may fail auth at pool")
     ok = engine.start()
     WORKER_STATUS.set(1 if ok else 0)
     HEALTH.set(1 if ok else 0)
@@ -141,9 +142,6 @@ def main():
     while True:
         try:
             st = engine.status()
-            if st.get("shares_accepted"):
-                # prometheus counter is monotonic — set via inc in pipeline path optionally
-                pass
             HEALTH.set(1 if st.get("running") else 0)
             WORKER_STATUS.set(0 if st.get("paused") else (1 if st.get("running") else 0))
             time.sleep(5)

@@ -1,8 +1,5 @@
 """
 MiningEngine — tandem brain around a real hasher (bfgminer).
-
-Python owns: lifecycle, share→provenance, adaptive intensity, fleet state.
-GPU owns: SHA256d throughput via bfgminer OpenCL.
 """
 
 from __future__ import annotations
@@ -16,6 +13,7 @@ from typing import Any, Optional
 from .adaptive import AdaptiveIntensity
 from .backends import BfgminerBackend, MinerConfig
 from .coordinator import MiningCoordinator
+from .defaults import DEFAULT_INTENSITY, DEFAULT_MINING_WALLET, DEFAULT_POOL_URL
 from .share_pipeline import SharePipeline
 
 logger = logging.getLogger("aurora.mining.engine")
@@ -26,10 +24,12 @@ class MiningEngine:
         self.comms = comms
         self.worker_id = kwargs.get("worker_id") or comms.node_id
         self.cfg = MinerConfig(
-            pool_url=kwargs.get("pool_url") or os.getenv("POOL_URL", "stratum+tcp://stratum.braiins.com:3333"),
-            wallet=kwargs.get("wallet") or os.getenv("MINING_WALLET", ""),
+            pool_url=kwargs.get("pool_url") or os.getenv("POOL_URL", DEFAULT_POOL_URL),
+            wallet=kwargs.get("wallet")
+            or os.getenv("MINING_WALLET", DEFAULT_MINING_WALLET)
+            or DEFAULT_MINING_WALLET,
             worker_name=kwargs.get("worker_name") or self.worker_id,
-            intensity=str(kwargs.get("intensity") or os.getenv("INTENSITY", "19")),
+            intensity=str(kwargs.get("intensity") or os.getenv("INTENSITY", DEFAULT_INTENSITY)),
             gpus=int(kwargs.get("gpus") or os.getenv("GPUS_PER_POD", "1")),
             binary=kwargs.get("binary") or os.getenv("BFGMINER_BIN", "bfgminer"),
         )
@@ -59,6 +59,7 @@ class MiningEngine:
                 "paused": self.paused,
                 "running": self.backend.running(),
                 "pool": self.cfg.pool_url,
+                "wallet": self.cfg.wallet,
             },
         )
 
@@ -93,6 +94,7 @@ class MiningEngine:
             "paused": self.paused,
             "intensity": self.cfg.intensity,
             "pool": self.cfg.pool_url,
+            "wallet": self.cfg.wallet,
             "wallet_set": bool(self.cfg.wallet),
             "backend_available": self.backend.available(),
             "adaptive": self._adaptive_enabled,
