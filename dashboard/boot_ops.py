@@ -1,4 +1,4 @@
-"""Mount ops + live status + mining + BVL economy."""
+"""Mount ops + live status + mining + multi-coin + BVL economy."""
 from __future__ import annotations
 
 import logging
@@ -74,9 +74,15 @@ def boot(
         logger.warning(f"mining_engine_ops: {e}")
 
     try:
+        from dashboard.mining_coins_ops import install_mining_coins_ops
+
+        install_mining_coins_ops(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"mining_coins_ops: {e}")
+
+    try:
         from dashboard.status_live import install_status_live
 
-        # bus optional — pass from run.py if available
         install_status_live(app, get_comms=get_comms, bus=bus)
     except Exception as e:
         logger.warning(f"status_live: {e}")
