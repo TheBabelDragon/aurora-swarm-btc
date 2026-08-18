@@ -1,9 +1,9 @@
 {
   "name": "torrent_protocol",
   "type": "comms",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "entry": "entrypoint.py",
   "enabled": true,
-  "dependencies": ["comms"],
-  "description": "Maximum-resilience in-mesh piece distribution with background retry, stall recovery, and full foolproofing"
+  "dependencies": ["comms", "asset_fabric"],
+  "description": "In-mesh piece distribution with verify-on-receive, peer evidence, stall recovery"
 }
