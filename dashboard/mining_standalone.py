@@ -1,6 +1,4 @@
-"""
-Mining Start/Stop/Status with ZERO Redis and ZERO blocking on the request path.
-"""
+"""Mining Start/Stop/Status + official log. No Redis on the request path."""
 
 from __future__ import annotations
 
@@ -21,7 +19,10 @@ _last_error = ""
 _hashrate_hs = 0.0
 _wallet = ""
 _pool = ""
+_user = ""
 _job_ready = False
+_authorized = False
+_shares = {"submitted": 0, "accepted": 0, "rejected": 0}
 _backend = "cpu_stratum"
 
 
@@ -79,9 +80,34 @@ def _fmt(hs: float, running: bool) -> str:
     return f"{hs:.0f} H/s"
 
 
+def _pull_official():
+    global _job_ready, _authorized, _shares, _user, _pool
+    try:
+        inner = getattr(getattr(_miner, "backend", None), "_miner", None)
+        backend = getattr(_miner, "backend", None)
+        extra = {}
+        if backend and hasattr(backend, "official_status"):
+            extra = backend.official_status() or {}
+        _authorized = bool(extra.get("authorized") or getattr(inner, "authorized", False))
+        _job_ready = bool(extra.get("job_ready") or getattr(inner, "job_ready", False))
+        _shares = {
+            "submitted": int(extra.get("shares_submitted") or getattr(inner, "shares_submitted", 0) or 0),
+            "accepted": int(extra.get("shares_accepted") or getattr(inner, "shares_accepted", 0) or 0),
+            "rejected": int(extra.get("shares_rejected") or getattr(inner, "shares_rejected", 0) or 0),
+        }
+        if extra.get("username"):
+            _user = extra["username"]
+        if getattr(_miner, "cfg", None):
+            _pool = getattr(_miner.cfg, "pool_url", _pool) or _pool
+    except Exception:
+        pass
+
+
 def _snapshot() -> dict:
     running = (_running and not _user_stopped) or (_starting and not _user_stopped)
     hs = _hashrate_hs if running else 0.0
+    from mods.mining_engine.mine_log import log_path
+
     return {
         "ok": True,
         "running": running,
@@ -91,25 +117,37 @@ def _snapshot() -> dict:
         "hashrate_hs": hs,
         "hashrate_display": _fmt(hs, running),
         "wallet": _wallet,
+        "user": _user or _wallet,
         "pool": _pool,
-        "error": _last_error or "",
+        "authorized": bool(_authorized),
         "job_ready": bool(_job_ready),
+        "shares": dict(_shares),
+        "error": _last_error or "",
+        "log_path": str(log_path()),
         "offline": os.getenv("AURORA_MINE_OFFLINE", "0") in ("1", "true", "True"),
         "engine_built": True,
     }
 
 
 def _ensure_miner():
-    global _miner, _wallet, _pool, _backend
+    global _miner, _wallet, _pool, _backend, _user
     if _miner is not None:
         return _miner
     os.environ.setdefault("AURORA_MINER_BACKEND", "cpu")
-    from mods.mining_engine.defaults import DEFAULT_INTENSITY, DEFAULT_MINING_WALLET, DEFAULT_POOL_URL
+    from mods.mining_engine.defaults import (
+        DEFAULT_INTENSITY,
+        DEFAULT_MINING_WALLET,
+        resolve_pool_url,
+        stratum_user,
+    )
     from mods.mining_engine.engine import MiningEngine
+    from mods.mining_engine.mine_log import mine_log
 
     _wallet = (os.getenv("MINING_WALLET") or DEFAULT_MINING_WALLET).strip()
-    _pool = os.getenv("POOL_URL", DEFAULT_POOL_URL)
     null = _NullComms()
+    _user = stratum_user(_wallet, null.node_id)
+    _pool = resolve_pool_url(_wallet, os.getenv("POOL_URL") or "")
+    mine_log("info", f"engine build wallet={_wallet} user={_user} pool={_pool}")
     _miner = MiningEngine(
         null,
         worker_id=null.node_id,
@@ -124,7 +162,7 @@ def _ensure_miner():
 
 
 def _bg_start():
-    global _running, _starting, _last_error, _hashrate_hs, _job_ready
+    global _running, _starting, _last_error, _hashrate_hs
     try:
         eng = _ensure_miner()
         ok = eng.start()
@@ -134,16 +172,13 @@ def _bg_start():
         except Exception:
             st = {}
         _hashrate_hs = float(st.get("hashrate_hs") or 0)
-        _job_ready = bool(getattr(getattr(eng, "backend", None), "_miner", None) and getattr(eng.backend._miner, "job_ready", False))
+        _pull_official()
         if not ok:
-            _last_error = st.get("error") or _last_error or "pool connect failed — set POOL_URL or AURORA_MINE_OFFLINE=1"
+            _last_error = st.get("error") or _last_error or "pool connect failed"
             _running = False
         else:
             _running = True
-            if st.get("error"):
-                _last_error = st.get("error")
-            else:
-                _last_error = ""
+            _last_error = st.get("error") or ""
     except Exception as e:
         _last_error = str(e)
         _running = False
@@ -153,7 +188,7 @@ def _bg_start():
 
 
 def _bg_poll():
-    global _hashrate_hs, _running, _last_error, _job_ready
+    global _hashrate_hs, _running, _last_error
     while True:
         time.sleep(2)
         if _user_stopped or not _running:
@@ -164,8 +199,7 @@ def _bg_poll():
             st = _miner.status()
             _hashrate_hs = float(st.get("hashrate_hs") or 0)
             _running = bool(st.get("running"))
-            inner = getattr(getattr(_miner, "backend", None), "_miner", None)
-            _job_ready = bool(getattr(inner, "job_ready", False) or getattr(inner, "offline", False))
+            _pull_official()
             if st.get("error"):
                 _last_error = st.get("error") or ""
         except Exception as e:
@@ -181,6 +215,12 @@ def install_mining_standalone(app: Any):
     @app.get("/mining/engine/status")
     def mining_status():
         return _snapshot()
+
+    @app.get("/mining/engine/log")
+    def mining_log(lines: int = 80):
+        from mods.mining_engine.mine_log import log_path, tail
+
+        return {"ok": True, "path": str(log_path()), "lines": tail(lines)}
 
     @app.post("/mining/engine/start")
     def mining_start():
@@ -199,13 +239,14 @@ def install_mining_standalone(app: Any):
 
     @app.post("/mining/engine/stop")
     def mining_stop():
-        global _user_stopped, _starting, _running, _hashrate_hs, _last_error, _job_ready
+        global _user_stopped, _starting, _running, _hashrate_hs, _last_error, _job_ready, _authorized
         with _lock:
             _user_stopped = True
             _starting = False
             _running = False
             _hashrate_hs = 0.0
             _job_ready = False
+            _authorized = False
             _last_error = ""
         try:
             if _miner is not None:
@@ -222,4 +263,4 @@ def install_mining_standalone(app: Any):
         _poll_started = True
         threading.Thread(target=_bg_poll, name="mine-poll", daemon=True).start()
 
-    logger.info("mining_standalone routes mounted (cpu default, no redis)")
+    logger.info("mining_standalone official log routes mounted")
