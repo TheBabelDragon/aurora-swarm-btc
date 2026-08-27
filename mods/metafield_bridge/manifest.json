@@ -1,0 +1,9 @@
+{
+  "name": "metafield_bridge",
+  "type": "sensing",
+  "version": "0.1.0",
+  "entry": "entrypoint.py",
+  "enabled": true,
+  "dependencies": ["comms"],
+  "description": "Read MetaField stats.json and optionally publish live scalars onto the Aurora mesh"
+}
