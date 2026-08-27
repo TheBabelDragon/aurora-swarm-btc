@@ -1,4 +1,4 @@
-"""Fleet + BVL routes only — no second Mining UI inject.
+"""Fleet + BVL + command routes — no second Mining UI inject.
 
 home_template.html owns Start/Stop/status. Do not inject /ux/extra.js.
 """
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastapi import Form
 from fastapi.responses import JSONResponse
@@ -56,6 +56,54 @@ def install_ops_native(app: Any, *, get_comms: Callable[[], Any]):
             )
         return {"nodes": nodes_out, "ts": time.time()}
 
+    @app.get("/events")
+    def events(limit: int = 20):
+        try:
+            return {"events": get_comms().get_recent_events(limit) or []}
+        except Exception as e:
+            return {"events": [], "error": str(e)}
+
+    @app.post("/command/broadcast")
+    async def command_broadcast(
+        action: str = Form(...),
+        factor: Optional[float] = Form(None),
+        reason: str = Form("manual"),
+    ):
+        payload = {"action": action, "reason": reason}
+        if factor is not None:
+            payload["factor"] = factor
+        try:
+            get_comms().broadcast_to_workers(payload)
+            return {"status": "sent", "action": action, "target": "all_workers"}
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    @app.post("/command/to_node/{node_id}")
+    async def command_to_node(
+        node_id: str,
+        action: str = Form(...),
+        factor: Optional[float] = Form(None),
+        reason: str = Form("manual"),
+    ):
+        payload = {"action": action, "reason": reason}
+        if factor is not None:
+            payload["factor"] = factor
+        try:
+            get_comms().send_to_node(node_id, payload)
+            return {"status": "sent", "action": action, "target": node_id}
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    @app.get("/metafield/status")
+    def metafield_status():
+        try:
+            from mods.metafield_bridge.bridge import load_stats, snapshot_from_stats
+
+            snap = snapshot_from_stats(load_stats())
+            return {"ok": True, **snap}
+        except Exception as e:
+            return {"ok": False, "live": False, "health": "unavailable", "error": str(e)}
+
     @app.post("/bvl/transfer_safe")
     async def bvl_transfer_safe(
         to_node: str = Form(...),
@@ -75,4 +123,4 @@ def install_ops_native(app: Any, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-    logger.info("ops_native installed (fleet+bvl only, no dual mining UI)")
+    logger.info("ops_native installed (fleet+commands+bvl+metafield, no dual mining UI)")

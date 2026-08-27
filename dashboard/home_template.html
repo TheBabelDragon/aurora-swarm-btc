@@ -1,15 +1,22 @@
 <!DOCTYPE html>
-<html><head><title>Aurora Swarm</title>
+<html><head><title>Aurora Swarm — Comms Operations Center</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#0a0a0a;color:#0f0;margin:40px}
 h1,h2{color:#0f0;margin-top:0}
 .card{background:#111;border:1px solid #0f0;padding:20px;margin:20px 0;border-radius:8px}
-.metric{font-size:1.6em;font-weight:bold}
-button{background:#003300;color:#0f0;border:1px solid #0f0;padding:10px 18px;margin:4px;cursor:pointer;border-radius:4px;font-size:1em}
-.muted{color:#6a6}.success{color:#0f0}.error{color:#f66}
+pre{background:#000;padding:15px;overflow-x:auto;font-size:.85em}
+.metric{font-size:1.7em;font-weight:bold}
+button{background:#003300;color:#0f0;border:1px solid #0f0;padding:7px 14px;margin:3px;cursor:pointer;border-radius:4px}
+button.small{padding:4px 8px;font-size:.85em}
+button.danger{background:#330000;border-color:#f66;color:#f88}
+input,select{background:#000;color:#0f0;border:1px solid #0f0;padding:6px;margin:2px;border-radius:4px}
+.muted{color:#6a6}.mono{font-family:ui-monospace,monospace}.success{color:#0f0}.error{color:#f66}
+table{width:100%;border-collapse:collapse}td,th{border:1px solid #0f0;padding:6px;text-align:left}
+a{color:#0f0}
 #mine_status{padding:14px;border:1px solid #0f0;border-radius:6px;margin:10px 0}
 </style></head><body>
-<h1>Aurora Swarm</h1>
+<h1>Aurora Swarm — Comms Operations Center</h1>
+<p class="muted">They yearn for the mines. Mining Start/Stop is standalone; the rest of the center is back.</p>
 
 <div class="card">
 <h2>Mining</h2>
@@ -20,87 +27,220 @@ button{background:#003300;color:#0f0;border:1px solid #0f0;padding:10px 18px;mar
 </div>
 
 <div class="card">
-<h2>Status</h2>
-<div id="status">…</div>
+<h2>MetaField</h2>
+<div id="mf_status" class="muted">No export yet — run MetaField with --export-stats</div>
 </div>
 
-<div class="card">
-<h2>Shared window</h2>
-<div id="shared_window_status" class="muted">Mesh loads after mining is healthy</div>
+<div class="card" id="comms_panel">
+<h2>Comms Layer</h2>
+<div id="comms_card" class="muted">Connecting…</div>
+<div style="margin-top:8px">
+<button type="button" onclick="commsRegister()">Register on mesh</button>
+<button type="button" onclick="commsExport()">Export join pack</button>
+<a href="/comms/export.env" download="aurora-mesh.env"><button type="button">Download .env</button></a>
+<a href="/comms/export.sh" download="join-aurora-mesh.sh"><button type="button">Download join.sh</button></a>
 <button type="button" onclick="connectSharedWindow()">Connect shared window</button>
-<div id="chat_log" style="min-height:120px;border:1px solid #0f0;border-radius:6px;padding:8px;margin-top:8px"></div>
+</div>
+<pre id="comms_export" class="mono muted" style="max-height:100px;overflow:auto;margin-top:8px;white-space:pre-wrap"></pre>
+<div id="comms_result" style="min-height:18px;margin-top:6px"></div>
+<h2 style="margin-top:18px">Mesh Chat</h2>
+<div style="display:flex;gap:12px;flex-wrap:wrap">
+<div style="min-width:180px;flex:0 0 200px">
+<input id="chat_search" placeholder="Search users…" style="width:100%;margin-bottom:6px" oninput="refreshChatUsers()">
+<div id="chat_users" class="muted" style="max-height:220px;overflow:auto;border:1px solid #0f0;border-radius:6px;padding:6px">Loading…</div>
+<div style="margin-top:8px">
+<input id="chat_external" placeholder="External node id" style="width:100%;margin-bottom:4px">
+<button type="button" class="small" onclick="chatAddExternal()">Add / open</button>
+</div>
+</div>
+<div style="flex:1;min-width:240px">
+<div id="chat_title" class="muted" style="margin-bottom:4px">#swarm</div>
+<div id="chat_log" style="min-height:200px;max-height:280px;overflow:auto;border:1px solid #0f0;border-radius:6px;padding:8px;background:#0b0b0b"></div>
 <div style="margin-top:8px;display:flex;gap:6px">
-<input id="chat_text" placeholder="Message…" style="flex:1;background:#000;color:#0f0;border:1px solid #0f0;padding:6px">
+<input id="chat_text" placeholder="Message…" style="flex:1">
 <button type="button" onclick="chatSend()">Send</button>
 </div>
 </div>
+</div>
+</div>
 
+<div class="card"><h2>Swarm Status (live global)</h2>
+<div id="status">…</div>
+<div id="global_stats" class="muted" style="margin-top:8px"></div>
+<div id="btc_status" class="muted" style="margin-top:8px"></div>
+<div id="bvl_status" class="muted" style="margin-top:6px"></div>
+<div id="identity_status" class="muted" style="margin-top:6px"></div>
+</div>
+
+<div class="card"><h2>Node Command Center</h2>
+<p class="muted">Pick a mesh node, inspect live stats, send a targeted command.</p>
+<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+<select id="ncc_node" style="min-width:220px" onchange="nccLoad()"><option value="">— select node —</option></select>
+<button type="button" class="small" onclick="nccRefreshNodes()">Refresh list</button>
+</div>
+<div id="ncc_detail" class="muted" style="margin:10px 0;min-height:40px">No node selected</div>
+<div>
+<button type="button" onclick="nccCmd('pause')">Pause mining</button>
+<button type="button" onclick="nccCmd('resume')">Resume mining</button>
+<button type="button" onclick="nccCmd('status')">Request status</button>
+<button type="button" onclick="nccCmd('bvl_balance')">BVL balance</button>
+<input id="ncc_intensity" placeholder="intensity" style="width:90px">
+<button type="button" onclick="nccCmd('intensity')">Set intensity</button>
+<input id="ncc_msg" placeholder="DM message" style="min-width:160px">
+<button type="button" onclick="nccCmd('chat')">Send DM</button>
+</div>
+<div id="ncc_result" style="min-height:18px;margin-top:8px"></div>
+</div>
+
+<div class="card"><h2>Asset Transfer Manager</h2>
+<input type="file" id="torrent_file">
+<button type="button" onclick="uploadTorrent()">Upload and seed</button>
+<input id="ensure_infohash" placeholder="infohash">
+<button type="button" onclick="ensureAsset()">Ensure</button>
+<button type="button" onclick="processBroadcasts()">Process queue</button>
+<button type="button" onclick="registerIdentity()">Register identity</button>
+<div id="torrent_msg"></div>
+<div id="torrent_summary" class="muted"></div>
+</div>
+
+<div class="card"><h2>Nodes</h2><pre id="nodes"></pre></div>
+<div class="card"><h2>Events</h2><pre id="events"></pre></div>
+<div class="card"><h2>Fleet Commands</h2>
+<input id="target_node" placeholder="node id">
+<button type="button" onclick="sendBroadcast('pause')">Pause all</button>
+<button type="button" onclick="sendBroadcast('resume')">Resume all</button>
+<button type="button" onclick="sendBroadcast('adjust_intensity', 0.85)">Scale 85%</button>
+<button type="button" onclick="sendBroadcast('adjust_intensity', 1.0)">Normal</button>
+<button type="button" onclick="sendBroadcast('adjust_intensity', 1.15)">Scale 115%</button>
+<button type="button" onclick="sendToNode('pause')">Pause node</button>
+<button type="button" onclick="sendToNode('resume')">Resume node</button>
+<div id="command_result" class="muted"></div>
+</div>
+
+<script src="/ux/comms.js"></script>
 <script>
-function msg(t, ok){
-  var e=document.getElementById('mine_msg');
-  e.textContent=t; e.className=ok?'success':'error';
-}
-async function jfetch(url, opts, ms){
-  ms = ms || 4000;
-  var c = new AbortController();
-  var t = setTimeout(function(){ c.abort(); }, ms);
-  try{
-    var r = await fetch(url, Object.assign({}, opts||{}, {signal: c.signal}));
-    return await r.json();
-  } finally { clearTimeout(t); }
-}
+document.getElementById('chat_text').addEventListener('keydown',function(e){if(e.key==='Enter')chatSend();});
+function showT(m,ok){var e=document.getElementById('torrent_msg');if(e){e.textContent=m;e.className=ok?'success':'error';}}
+function mineMsg(t,ok){var e=document.getElementById('mine_msg');e.textContent=t;e.className=ok?'success':'error';}
+async function jfetch(url,opts,ms){ms=ms||4000;var c=new AbortController();var t=setTimeout(function(){c.abort();},ms);try{var r=await fetch(url,Object.assign({},opts||{},{signal:c.signal}));return await r.json();}finally{clearTimeout(t);}}
+
 async function refreshMine(){
   var box=document.getElementById('mine_status');
   try{
-    var d=await jfetch('/mining/engine/status', {}, 3000);
+    var d=await jfetch('/mining/engine/status',{},3000);
     var run=!!d.running;
     var rate=d.hashrate_display||(run?'warming up…':'idle');
     box.className=run?'success':'muted';
     box.innerHTML='<div class="metric">'+(run?'RUNNING':'STOPPED')+' · '+rate+'</div>'
       +'<div class="muted">'+(d.backend||'')+' · '+(d.pool||'')+'</div>'
       +(d.error?('<div class="error">'+d.error+'</div>'):'');
-    document.getElementById('status').innerHTML=box.innerHTML;
   }catch(e){
     box.className='error';
-    box.textContent='Cannot reach /mining/engine/status — is the container up? Try: docker compose ps';
+    box.textContent='Cannot reach /mining/engine/status — docker compose -f docker-compose.solo.yml ps';
   }
 }
 async function doStart(){
-  msg('Starting…', true);
-  document.getElementById('btn_start').disabled=true;
-  try{
-    var d=await jfetch('/mining/engine/start',{method:'POST'}, 5000);
-    msg(d.ok?'Started — hashing in background':(d.error||'failed'), !!d.ok);
-  }catch(e){
-    msg('Start failed to reach server', false);
-  }
-  document.getElementById('btn_start').disabled=false;
-  refreshMine();
+  mineMsg('Starting…',true); document.getElementById('btn_start').disabled=true;
+  try{var d=await jfetch('/mining/engine/start',{method:'POST'},5000); mineMsg(d.ok?'Started':(d.error||'failed'),!!d.ok);}
+  catch(e){mineMsg('Start failed to reach server',false);}
+  document.getElementById('btn_start').disabled=false; refreshMine();
 }
 async function doStop(){
-  msg('Stopping…', true);
-  try{
-    await jfetch('/mining/engine/stop',{method:'POST'}, 5000);
-    msg('Stopped', true);
-  }catch(e){
-    msg('Stop failed to reach server', false);
-  }
+  mineMsg('Stopping…',true);
+  try{await jfetch('/mining/engine/stop',{method:'POST'},5000); mineMsg('Stopped',true);}
+  catch(e){mineMsg('Stop failed to reach server',false);}
   refreshMine();
 }
 async function connectSharedWindow(){
-  try{
-    await jfetch('/comms/join_mesh',{method:'POST',body:new FormData()},8000);
-  }catch(e){}
+  try{await jfetch('/comms/join_mesh',{method:'POST',body:new FormData()},8000);}catch(e){}
 }
-async function chatSend(){
-  var input=document.getElementById('chat_text');
-  var text=(input.value||'').trim(); if(!text) return;
+async function refreshMeta(){
+  var el=document.getElementById('mf_status');
   try{
-    await jfetch('/comms/chat/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,room:'swarm'})},5000);
-    input.value='';
-  }catch(e){}
+    var d=await jfetch('/metafield/status',{},2500);
+    if(!d.live){el.className='muted';el.textContent='MetaField '+ (d.health||'no_export') +' · not live';return;}
+    var hmc=(d.hmc||{}); var att=(d.attractors||{}); var mem=(d.memory||{});
+    el.className='success';
+    el.innerHTML='<div class="metric">LIVE traj '+(d.traj||'?')+'</div>'
+      +'<div>accept '+(hmc.acceptance_rate!=null?Number(hmc.acceptance_rate).toFixed(2):'—')
+      +' · attractors '+(att.num_attractors||0)
+      +' · mem '+(mem.size||0)+'/'+(mem.soft_capacity||'?')+'</div>';
+  }catch(e){el.className='muted';el.textContent='MetaField bridge not reachable';}
 }
-refreshMine();
-setInterval(refreshMine, 2000);
+
+async function refresh(){try{
+var s=await fetch('/status').then(function(r){return r.json();});
+var rate=s.hashrate_display||(s.mining&&s.mining.hashrate_display)||'0 H/s';
+document.getElementById('status').innerHTML='<div class="metric">'+(s.active_workers||0)+' workers</div><p>Entropy '+(s.entropy||0)+' · '+rate+' · '+(s.mood||'')+'</p>';
+try{
+var g=await fetch('/comms/global').then(function(r){return r.json();});
+var b=g.bvl||{};
+var gs='Global compute <strong>'+(g.global_hashrate_display||'0 H/s')+'</strong> · peers <strong>'+(g.peer_count||0)+'</strong>';
+gs+=' · BVL supply <strong>'+(b.supply||0)+'</strong> · sum balances <strong>'+(b.balance_sum||0)+'</strong>';
+document.getElementById('global_stats').innerHTML=gs;
+document.getElementById('bvl_status').textContent='Local BVL bal='+(b.balance||0)+' · node='+(g.node_id||'');
+if(g.identity){document.getElementById('identity_status').textContent='Identity fp='+(g.identity.fingerprint||'')+' · '+(g.identity.address_style||'')+' · '+(g.identity.backend||'');}
+}catch(e){}
+try{var v=await fetch('/bvl/status').then(function(r){return r.json();});
+if(v.balances_global){document.getElementById('bvl_status').textContent='BVL local='+(v.balance||0)+' supply='+(v.supply||0)+' accounts='+Object.keys(v.balances_global).length;}
+}catch(e){}
+document.getElementById('nodes').innerText=JSON.stringify(await fetch('/nodes').then(function(r){return r.json();}),null,2);
+document.getElementById('events').innerText=JSON.stringify(await fetch('/events?limit=8').then(function(r){return r.json();}),null,2);
+nccRefreshNodes(); refreshMine(); refreshMeta();
+}catch(e){console.error(e);}}
+
+async function nccRefreshNodes(){
+try{
+var d=await fetch('/comms/chat/users').then(function(r){return r.json();});
+var sel=document.getElementById('ncc_node');
+var cur=sel.value;
+sel.innerHTML='<option value="">— select node —</option>';
+(d.users||[]).forEach(function(u){
+if(u.source==='self')return;
+var o=document.createElement('option');
+o.value=u.node_id;o.textContent=(u.online?'● ':'○ ')+u.node_id+' ('+u.source+')';
+sel.appendChild(o);
+});
+if(cur)sel.value=cur;
+}catch(e){}}
+
+async function nccLoad(){
+var id=document.getElementById('ncc_node').value;
+if(!id){document.getElementById('ncc_detail').textContent='No node selected';return;}
+try{
+var d=await fetch('/comms/node/'+encodeURIComponent(id)).then(function(r){return r.json();});
+var h='<span class="mono">'+id+'</span> · '+(d.online?'online':'offline');
+h+=' · BVL '+d.bvl_balance;
+var hr=d.hashrate||{};
+if(hr.hashrate_display)h+=' · '+hr.hashrate_display;
+else if(hr.hashrate_hs)h+=' · '+hr.hashrate_hs+' H/s';
+if(d.identity&&d.identity.fingerprint)h+=' · fp '+d.identity.fingerprint;
+document.getElementById('ncc_detail').innerHTML=h;
+document.getElementById('target_node').value=id;
+}catch(e){document.getElementById('ncc_detail').textContent='load failed';}}
+
+async function nccCmd(action){
+var id=document.getElementById('ncc_node').value;
+if(!id){document.getElementById('ncc_result').textContent='Select a node first';document.getElementById('ncc_result').className='error';return;}
+var fd=new FormData();fd.append('action',action);
+if(action==='intensity'){fd.append('intensity',document.getElementById('ncc_intensity').value||'19');}
+if(action==='chat'){fd.append('message',document.getElementById('ncc_msg').value||'ping');}
+var d=await fetch('/comms/node/'+encodeURIComponent(id)+'/command',{method:'POST',body:fd}).then(function(r){return r.json();});
+var o=document.getElementById('ncc_result');
+o.textContent=d.ok?(action+' → '+id+(d.balance!=null?(' bal='+d.balance):'')):(d.error||'failed');
+o.className=d.ok?'success':'error';
+if(action==='bvl_balance')nccLoad();
+}
+
+async function uploadTorrent(){var f=document.getElementById('torrent_file').files[0];if(!f)return;var fd=new FormData();fd.append('file',f);
+var data=await fetch('/torrent/upload',{method:'POST',body:fd}).then(function(r){return r.json();});showT(data.status==='ok'?'Seeded':'fail',data.status==='ok');}
+async function ensureAsset(){var ih=document.getElementById('ensure_infohash').value.trim();var fd=new FormData();fd.append('infohash',ih);await fetch('/torrent/ensure',{method:'POST',body:fd});}
+async function processBroadcasts(){await fetch('/torrent/process_broadcasts',{method:'POST'});}
+async function registerIdentity(){var d=await fetch('/btc/identity/register',{method:'POST'}).then(function(r){return r.json();});showT(d.status==='ok'?'Identity registered':'identity fail',d.status==='ok');refresh();}
+async function sendBroadcast(action,factor){var fd=new FormData();fd.append('action',action);fd.append('reason','dash');if(factor!=null)fd.append('factor',factor);
+var data=await fetch('/command/broadcast',{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.action;}
+async function sendToNode(action){var id=document.getElementById('target_node').value.trim();if(!id)return;var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
+var data=await fetch('/command/to_node/'+id,{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.target;}
+refresh();setInterval(refresh,4000);
 </script>
 </body></html>
