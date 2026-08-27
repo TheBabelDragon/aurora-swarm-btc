@@ -1,17 +1,18 @@
 # mine_governor
 
-Closes the gap between fleet talk and the hasher that actually runs.
+Actuator under `mods/mine_governor/`.
 
-Lives under `mods/mine_governor/`.
+| piece | job |
+|-------|-----|
+| `control.py` | map actions → stop/start/restart/threads |
+| `apply.py` | call `mining_standalone` |
+| `agent.py` | publish posture, consume `minecmd:{node}` |
+| `history.py` | last N applies |
+| `routes.py` | `GET /mining/governor` `POST /mining/governor/command` |
+| `hooks/on_node_select.py` | prefer governor nodes for mining tasks |
 
-- `control.py` — command map (pause → stop, factor → thread cap). No Redis.
-- `apply.py` — calls `dashboard.mining_standalone.request_start/stop`.
-- `agent.py` — publishes `aurora:mining:worker:{node}` and consumes `aurora:minecmd:{node}`.
+Local test without mesh:
 
-Node Command Center / scheduler should write:
-
+```bash
+curl -s http://127.0.0.1:8000/mining/governor
 ```
-set_state minecmd:<node_id>  {action, factor?, threads?}
-```
-
-This node applies it to the local CPU miner within a few seconds.
