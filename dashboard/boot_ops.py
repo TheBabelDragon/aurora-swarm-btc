@@ -96,6 +96,13 @@ def boot(
         logger.warning(f"mining_coins_ops: {e}")
 
     try:
+        from mods.mine_governor.routes import install_governor_routes
+
+        install_governor_routes(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"governor routes: {e}")
+
+    try:
         from mods.bvl.economy import start_economy
 
         start_economy(get_comms())
