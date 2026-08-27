@@ -1,4 +1,4 @@
-"""Official CPU stratum miner — full target, share accept/reject, file log."""
+"""Official CPU stratum miner — reconnect, quiet log, niceness."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import struct
 import threading
 import time
 from multiprocessing import Array, Process, Queue, Value
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Tuple
 from urllib.parse import urlparse
 
 from .mine_log import mine_log
@@ -37,6 +37,10 @@ def _diff_to_target(diff: float) -> int:
 
 
 def _hash_process(tid, step, stop_flag, hash_counter, prefix_buf, prefix_ready, target_buf, hits):
+    try:
+        os.nice(int(os.getenv("AURORA_MINE_NICE", "10") or 10))
+    except Exception:
+        pass
     nonce = tid & 0xFFFFFFFF
     dummy = b"\x00" * 76
     local = 0
@@ -94,10 +98,12 @@ class StratumCpuMiner:
         self._hashrate_hs = 0.0
         self._last_hr_t = time.time()
         self._last_hr_hashes = 0
+        self._last_hr_log = 0.0
         self._workers: List[Process] = []
         self._reader = None
         self._hr_thread = None
         self._submit_thread = None
+        self._watch = None
         self.last_error = ""
         self._stop_flag = Value("i", 0)
         self._hash_counter = Value("Q", 0)
@@ -109,12 +115,13 @@ class StratumCpuMiner:
     def get_hashrate_hs(self) -> float:
         return float(self._hashrate_hs)
 
-    def _emit(self, line: str, kind: str = "info"):
+    def _emit(self, line: str, kind: str = "info", persist: bool = True):
         try:
             self.lines.put_nowait(line.rstrip() + "\n")
         except queue.Full:
             pass
-        mine_log(kind, line)
+        if persist:
+            mine_log(kind, line)
         logger.info(line)
 
     def _rpc(self, method: str, params: list) -> int:
@@ -154,7 +161,7 @@ class StratumCpuMiner:
         try:
             self._sock = socket.create_connection((host, port), timeout=12)
             self._sock.settimeout(20)
-            self._rpc("mining.subscribe", ["aurora-official/1.0"])
+            self._rpc("mining.subscribe", ["aurora-official/1.1"])
             self._rpc("mining.authorize", [self.username, self.password])
             self._emit(f"connected {host}:{port} user={self.username}")
             self.last_error = ""
@@ -295,6 +302,31 @@ class StratumCpuMiner:
                 self.last_error = str(e)
                 self._emit(f"reader {e}", "error")
                 break
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+        self._sock = None
+        self.authorized = False
+        self.job_ready = False
+
+    def _watch_loop(self):
+        backoff = 3.0
+        while not self._stop.is_set():
+            time.sleep(backoff)
+            if self.offline:
+                continue
+            if self._sock is not None:
+                backoff = 3.0
+                continue
+            self._emit(f"reconnecting in {backoff:.0f}s", "warn")
+            if self.connect():
+                self._reader = threading.Thread(target=self._reader_loop, name="stratum-reader", daemon=True)
+                self._reader.start()
+                backoff = 3.0
+            else:
+                backoff = min(30.0, backoff * 1.6)
 
     def _submit_loop(self):
         hits = self._hits
@@ -339,8 +371,12 @@ class StratumCpuMiner:
                 shown = f"{rate/1e3:.2f} KH/s"
             else:
                 shown = f"{rate:.0f} H/s"
+            persist = (now - self._last_hr_log) >= 30
+            if persist:
+                self._last_hr_log = now
             self._emit(
-                f"hashrate {shown} acc={self.shares_accepted} rej={self.shares_rejected} sub={self.shares_submitted}"
+                f"hashrate {shown} acc={self.shares_accepted} rej={self.shares_rejected} sub={self.shares_submitted}",
+                persist=persist,
             )
 
     def _spawn_workers(self):
@@ -368,23 +404,25 @@ class StratumCpuMiner:
             )
             p.start()
             self._workers.append(p)
-        self._emit(f"hasher processes={self.threads} cores={os.cpu_count()} offline={self.offline}")
+        self._emit(f"hasher processes={self.threads} cores={os.cpu_count()} nice={os.getenv('AURORA_MINE_NICE', '10')}")
 
     def start(self) -> bool:
         self._stop.clear()
         self._en1_ready = self.offline
         self.job_ready = self.offline
-        if not self.connect():
-            return False
+        ok = self.connect()
         self._spawn_workers()
         if not self.offline:
-            self._reader = threading.Thread(target=self._reader_loop, name="stratum-reader", daemon=True)
-            self._reader.start()
+            if ok:
+                self._reader = threading.Thread(target=self._reader_loop, name="stratum-reader", daemon=True)
+                self._reader.start()
             self._submit_thread = threading.Thread(target=self._submit_loop, name="stratum-submit", daemon=True)
             self._submit_thread.start()
+            self._watch = threading.Thread(target=self._watch_loop, name="stratum-watch", daemon=True)
+            self._watch.start()
         self._hr_thread = threading.Thread(target=self._hr_loop, name="stratum-hr", daemon=True)
         self._hr_thread.start()
-        return True
+        return True if self.offline else True
 
     def stop(self):
         self._stop.set()
@@ -411,6 +449,4 @@ class StratumCpuMiner:
     def running(self) -> bool:
         if self._stop.is_set():
             return False
-        if self.offline:
-            return any(p.is_alive() for p in self._workers)
-        return self._sock is not None
+        return any(p.is_alive() for p in self._workers) or self._sock is not None
