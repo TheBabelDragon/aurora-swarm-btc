@@ -1,8 +1,8 @@
 {
   "name": "mine_governor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "enabled": true,
-  "description": "Closes the loop: mesh/scheduler commands apply to the local CPU miner (pause, resume, thread cap).",
+  "description": "Actuator: mesh/scheduler commands apply to the local CPU miner. Status + history + thread cap.",
   "entrypoint": "entrypoint.py",
   "capabilities": ["mine_governor", "fleet_control", "cpu_alloc"]
 }
