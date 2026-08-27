@@ -12,7 +12,6 @@ logger = logging.getLogger("aurora-dashboard")
 app = FastAPI(title="Aurora Swarm BTC — Comms Operations Center")
 bus = Bus()
 
-# ─── Mining FIRST (no Redis) so Start/Stop/Status always answer ───
 try:
     from dashboard.mining_standalone import install_mining_standalone
 
@@ -31,7 +30,6 @@ def ping():
     return {"ok": True}
 
 
-# Comms after mining routes — never block mining on Redis
 comms = None
 try:
     from comms.layer import CommsLayer
@@ -124,7 +122,6 @@ def get_fabric():
 
 @app.on_event("startup")
 async def startup():
-    # Soft register only — never block
     try:
         if hasattr(comms, "register_node"):
             comms.register_node(
@@ -153,7 +150,6 @@ async def startup():
 
 @app.get("/status")
 def status():
-    # Prefer standalone mining truth
     mine = {}
     try:
         from dashboard.mining_standalone import _snapshot
@@ -193,4 +189,6 @@ def root():
         html = p.read_text(encoding="utf-8")
     except Exception:
         html = "<h1>Aurora</h1><p>home_template.html missing — rebuild image</p>"
+    if "/ux/mine.js" not in html:
+        html = html.replace("</body>", '<script src="/ux/mine.js"></script>\n</body>')
     return HTMLResponse(content=html)
