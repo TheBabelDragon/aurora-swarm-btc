@@ -1,4 +1,4 @@
-"""Mining Start/Stop/Status + official log. No Redis on the request path."""
+"""Mining Start/Stop/Status + official log. Fleet hooks for mine_governor."""
 
 from __future__ import annotations
 
@@ -122,6 +122,7 @@ def _snapshot() -> dict:
         "authorized": bool(_authorized),
         "job_ready": bool(_job_ready),
         "shares": dict(_shares),
+        "cpu_threads": int(os.getenv("AURORA_CPU_THREADS", "0") or 0),
         "error": _last_error or "",
         "log_path": str(log_path()),
         "offline": os.getenv("AURORA_MINE_OFFLINE", "0") in ("1", "true", "True"),
@@ -159,6 +160,60 @@ def _ensure_miner():
     )
     _backend = getattr(getattr(_miner, "backend", None), "kind", "cpu_stratum")
     return _miner
+
+
+def rebuild_engine():
+    """Drop cached engine so thread count / pool env is picked up."""
+    global _miner
+    try:
+        if _miner is not None:
+            _miner.stop()
+    except Exception:
+        pass
+    _miner = None
+
+
+def request_stop(reason: str = "api"):
+    global _user_stopped, _starting, _running, _hashrate_hs, _last_error, _job_ready, _authorized
+    with _lock:
+        _user_stopped = True
+        _starting = False
+        _running = False
+        _hashrate_hs = 0.0
+        _job_ready = False
+        _authorized = False
+        _last_error = ""
+    try:
+        if _miner is not None:
+            _miner.stop()
+    except Exception as e:
+        logger.warning("stop: %s", e)
+    try:
+        from mods.mining_engine.mine_log import mine_log
+
+        mine_log("info", f"stop reason={reason}")
+    except Exception:
+        pass
+    return _snapshot()
+
+
+def request_start(reason: str = "api"):
+    global _user_stopped, _starting, _running, _last_error
+    with _lock:
+        _user_stopped = False
+        _last_error = ""
+        if _starting or _running:
+            return {**_snapshot(), "already": True}
+        _starting = True
+        _running = True
+    try:
+        from mods.mining_engine.mine_log import mine_log
+
+        mine_log("info", f"start reason={reason}")
+    except Exception:
+        pass
+    threading.Thread(target=_bg_start, name="mine-start", daemon=True).start()
+    return {**_snapshot(), "ok": True}
 
 
 def _bg_start():
@@ -224,36 +279,11 @@ def install_mining_standalone(app: Any):
 
     @app.post("/mining/engine/start")
     def mining_start():
-        global _user_stopped, _starting, _running, _last_error
-        with _lock:
-            _user_stopped = False
-            _last_error = ""
-            if _starting:
-                return _snapshot()
-            if _running:
-                return {**_snapshot(), "already": True}
-            _starting = True
-            _running = True
-        threading.Thread(target=_bg_start, name="mine-start", daemon=True).start()
-        return {**_snapshot(), "ok": True}
+        return request_start("api")
 
     @app.post("/mining/engine/stop")
     def mining_stop():
-        global _user_stopped, _starting, _running, _hashrate_hs, _last_error, _job_ready, _authorized
-        with _lock:
-            _user_stopped = True
-            _starting = False
-            _running = False
-            _hashrate_hs = 0.0
-            _job_ready = False
-            _authorized = False
-            _last_error = ""
-        try:
-            if _miner is not None:
-                _miner.stop()
-        except Exception as e:
-            logger.warning("stop: %s", e)
-        return _snapshot()
+        return request_stop("api")
 
     @app.get("/mining/ping")
     def mining_ping():
@@ -263,4 +293,4 @@ def install_mining_standalone(app: Any):
         _poll_started = True
         threading.Thread(target=_bg_poll, name="mine-poll", daemon=True).start()
 
-    logger.info("mining_standalone official log routes mounted")
+    logger.info("mining_standalone + governor hooks mounted")
