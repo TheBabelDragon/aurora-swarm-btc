@@ -1,7 +1,5 @@
 """
 LAN mesh discovery — UDP beacon so peers find Redis without typing IPs.
-
-Beacon port default 7379. Payload is signed JSON (see beacon_auth).
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ import os
 import socket
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from comms.beacon_auth import sign_beacon, verify_beacon
 
@@ -21,6 +19,8 @@ logger = logging.getLogger("aurora.comms.discovery")
 DISCOVERY_PORT = int(os.getenv("AURORA_DISCOVERY_PORT", "7379") or 7379)
 BEACON_INTERVAL = float(os.getenv("AURORA_BEACON_INTERVAL", "5") or 5)
 MAGIC = "AURORA_MESH_V1"
+
+PeerHook = Callable[[Dict[str, Any]], None]
 
 
 def _local_ipv4s() -> List[str]:
@@ -42,17 +42,10 @@ def _local_ipv4s() -> List[str]:
                 ips.append(ip)
     except Exception:
         pass
-    try:
-        for _name, addrs in socket.getaddrinfo(socket.gethostname(), None):
-            pass
-    except Exception:
-        pass
-    # last-ditch: enumerate interfaces via hostname -I style is not portable; keep list
     return ips or ["127.0.0.1"]
 
 
 def public_redis_url(redis_url: str) -> str:
-    """Rewrite docker-internal redis://redis:6379 → LAN IP for peers."""
     url = (redis_url or "").strip() or "redis://127.0.0.1:6379/0"
     ips = _local_ipv4s()
     lan = ips[0]
@@ -119,13 +112,16 @@ class MeshDiscovery:
         self._seen: Dict[str, Dict[str, Any]] = {}
         self._pins: Dict[str, str] = {}
         self._lock = threading.Lock()
+        self._hooks: List[PeerHook] = []
         self._beacon_t: Optional[threading.Thread] = None
         self._listen_t: Optional[threading.Thread] = None
         self.listen_ok = False
         self.last_listen_error = ""
 
+    def on_peer(self, hook: PeerHook):
+        self._hooks.append(hook)
+
     def set_join_url(self, redis_url: str):
-        """After mesh join, advertise the shared leader — not the local island."""
         self.redis_url = redis_url
         self.join_url = public_redis_url(redis_url)
         logger.info("discovery now advertises join=%s", self.join_url)
@@ -152,6 +148,13 @@ class MeshDiscovery:
         }
         signed = sign_beacon(body, node_key_hex=_node_key_hex())
         return json.dumps(signed).encode("utf-8")
+
+    def _fire(self, msg: Dict[str, Any]):
+        for hook in list(self._hooks):
+            try:
+                hook(msg)
+            except Exception as e:
+                logger.debug("on_peer hook: %s", e)
 
     def _beacon_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -212,6 +215,7 @@ class MeshDiscovery:
                 continue
             with self._lock:
                 pins = dict(self._pins)
+                first = nid not in self._seen
             ok, reason = verify_beacon(msg, pinned=pins)
             if not ok:
                 logger.info("drop beacon from %s (%s): %s", addr[0], nid, reason)
@@ -225,6 +229,8 @@ class MeshDiscovery:
                 if fp:
                     self._pins.setdefault(nid, fp)
                 self._seen[nid] = msg
+            if first:
+                threading.Thread(target=self._fire, args=(dict(msg),), daemon=True).start()
         try:
             sock.close()
         except Exception:
