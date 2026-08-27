@@ -11,32 +11,25 @@ Expected payload examples:
     {"asset": "gpu_kernel_v3", "infohash": "..."}
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Any, Dict, Optional
 
-from comms.layer import CommsLayer, SwarmMessage
-
 logger = logging.getLogger("aurora.torrent.hooks")
 
-# We keep a weak reference to a live CommsLayer if one was injected.
-# In real deployments the host process usually has one already.
-_comms: Optional[CommsLayer] = None
+# Weak handle to a live CommsLayer if the host injected one.
+_comms = None
 
 
-def set_comms(comms: CommsLayer):
+def set_comms(comms: Any) -> None:
     """Optional helper so the host can inject the live CommsLayer."""
     global _comms
     _comms = comms
 
 
 def on_asset_needed(asset_info: Dict[str, Any], *args, **kwargs) -> None:
-    """
-    Hook entrypoint.
-
-    Publishes an "asset.needed" event onto the mesh.
-    Any running TorrentManager will pick it up and call start_download
-    if it does not already have the complete file.
-    """
+    """Publish an asset.needed event onto the mesh when comms is available."""
     infohash = asset_info.get("infohash") or asset_info.get("hash")
     name = asset_info.get("name") or asset_info.get("asset")
 
@@ -46,14 +39,19 @@ def on_asset_needed(asset_info: Dict[str, Any], *args, **kwargs) -> None:
 
     payload = {"infohash": infohash, "name": name, **asset_info}
 
-    if _comms is not None:
+    if _comms is None:
+        logger.info("on_asset_needed (no live comms): %s", payload)
+        return
+
+    try:
+        from comms.layer import SwarmMessage
+
         msg = SwarmMessage(
             type="asset.needed",
             payload=payload,
-            source=_comms.node_id,
+            source=getattr(_comms, "node_id", "torrent"),
         )
         _comms.publish_message("asset.needed", msg)
-        logger.info(f"Published asset.needed for {infohash or name}")
-    else:
-        # Fallback: just log. The host is expected to wire a live CommsLayer.
-        logger.info(f"on_asset_needed (no live comms): {payload}")
+        logger.info("Published asset.needed for %s", infohash or name)
+    except Exception as exc:
+        logger.info("on_asset_needed (comms unavailable: %s): %s", exc, payload)

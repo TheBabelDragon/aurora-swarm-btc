@@ -5,7 +5,7 @@ without knowing the internals of the torrent manager.
 """
 
 from scheduler.hook_registry import registry
-from .hooks.on_asset_needed import on_asset_needed
+from mods.torrent_protocol.hooks.on_asset_needed import on_asset_needed
 
 
 def register():

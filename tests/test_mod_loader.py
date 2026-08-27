@@ -21,6 +21,7 @@ class LoaderTests(unittest.TestCase):
         self.assertIn("metafield_bridge", loaded)
         self.assertIn("thermal_aware_scheduler", loaded)
         self.assertIn("gpu_utilization_balancer", loaded)
+        self.assertIn("torrent_protocol", loaded)
         self.assertTrue(loaded["metafield_bridge"].get("enabled"))
 
 
