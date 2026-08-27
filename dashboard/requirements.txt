@@ -4,3 +4,4 @@ redis
 requests
 prometheus-client
 python-multipart
+pydantic

@@ -1,4 +1,8 @@
-"""Reliable pure-Python stratum CPU miner — empty extranonce1 OK (Braiins)."""
+"""CPU stratum miner — process workers (escape the GIL), robust handshake.
+
+Empty extranonce1 is valid (Braiins). Set AURORA_MINE_OFFLINE=1 to hash
+dummy work without a pool (proves the hasher; does not earn shares).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ import socket
 import struct
 import threading
 import time
+from multiprocessing import Process, Value
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -33,6 +38,22 @@ def _diff_to_target(diff: float) -> int:
     return int(max_target / diff)
 
 
+def _hash_process(tid: int, step: int, stop_flag, hash_counter, prefix_buf, prefix_ready):
+    """Module-level so it pickles into a child process."""
+    nonce = tid & 0xFFFFFFFF
+    dummy = b"\x00" * 76
+    while stop_flag.value == 0:
+        if prefix_ready.value == 0:
+            header = dummy + struct.pack("<I", nonce)
+        else:
+            header = bytes(prefix_buf) + struct.pack("<I", nonce)
+        _sha256d(header)
+        nonce = (nonce + step) & 0xFFFFFFFF
+        if (nonce & 0x3FF) == (tid & 0x3FF):
+            with hash_counter.get_lock():
+                hash_counter.value += 1024
+
+
 class StratumCpuMiner:
     def __init__(
         self,
@@ -48,8 +69,11 @@ class StratumCpuMiner:
         self.username = username
         self.password = password
         cpus = os.cpu_count() or 2
-        # Allow aggressive oversubscribe (GIL still limits, but more runnable threads help util)
-        self.threads = max(1, min(threads if threads and threads > 0 else cpus * 3, max(cpus * 4, 32)))
+        offline = os.getenv("AURORA_MINE_OFFLINE", "0") in ("1", "true", "True")
+        self.offline = offline
+        # Processes, not threads — 1 per core is the useful default
+        default_n = cpus if offline else max(1, cpus)
+        self.threads = max(1, threads if threads and threads > 0 else default_n)
         self.lines: queue.Queue = line_queue if line_queue is not None else queue.Queue(maxsize=500)
         self.comms = comms
         self.coin = coin
@@ -68,17 +92,22 @@ class StratumCpuMiner:
         self._job_id: Optional[str] = None
         self._current_en2 = b"\x00" * 4
         self._target = _diff_to_target(1.0)
+        self.job_ready = False
+        self.authorized = False
 
-        self._hashes = 0
-        self._hashes_lock = threading.Lock()
         self._hashrate_hs = 0.0
         self._last_hr_t = time.time()
         self._last_hr_hashes = 0
 
-        self._workers: List[threading.Thread] = []
+        self._workers: List[Process] = []
         self._reader: Optional[threading.Thread] = None
         self._hr_thread: Optional[threading.Thread] = None
         self.last_error = ""
+
+        self._stop_flag = Value("i", 0)
+        self._hash_counter = Value("Q", 0)
+        self._prefix_buf = None
+        self._prefix_ready = Value("i", 1 if offline else 0)
 
     def get_hashrate_hs(self) -> float:
         return float(self._hashrate_hs)
@@ -88,6 +117,7 @@ class StratumCpuMiner:
             self.lines.put_nowait(line.rstrip() + "\n")
         except queue.Full:
             pass
+        logger.info(line)
 
     def _rpc(self, method: str, params: list) -> int:
         self._msg_id += 1
@@ -97,26 +127,65 @@ class StratumCpuMiner:
         self._sock.sendall(payload.encode())
         return mid
 
+    def _apply_subscribe(self, res: Any) -> bool:
+        """Accept common stratum subscribe shapes."""
+        en1 = None
+        en2 = 4
+        if isinstance(res, list) and len(res) >= 3 and isinstance(res[1], str):
+            en1, en2 = res[1], res[2]
+        elif isinstance(res, dict):
+            en1 = res.get("extranonce1") or res.get("extra_nonce1")
+            en2 = res.get("extranonce2_size") or res.get("extra_nonce2_size") or 4
+        if en1 is None:
+            return False
+        with self._job_lock:
+            self._extranonce1 = en1 if isinstance(en1, str) else ""
+            self._en1_ready = True
+            try:
+                self._extranonce2_size = int(en2)
+            except Exception:
+                self._extranonce2_size = 4
+            self._rebuild_prefix()
+        self._emit(f"Subscribed en1_len={len(self._extranonce1)} en2_size={self._extranonce2_size}")
+        return True
+
     def connect(self) -> bool:
+        if self.offline:
+            self.last_error = ""
+            self._emit("OFFLINE hasher — no pool (AURORA_MINE_OFFLINE=1)")
+            return True
         host, port = _parse_pool(self.pool_url)
         try:
-            self._sock = socket.create_connection((host, port), timeout=20)
-            self._sock.settimeout(30)
-            self._rpc("mining.subscribe", ["aurora-cpu/0.6"])
+            self._sock = socket.create_connection((host, port), timeout=12)
+            self._sock.settimeout(20)
+            self._rpc("mining.subscribe", ["aurora-cpu/0.7"])
             self._rpc("mining.authorize", [self.username, self.password])
             self._emit(f"Connected {host}:{port} as {self.username}")
             self.last_error = ""
             return True
+        except socket.timeout:
+            self.last_error = f"timeout connecting {host}:{port}"
+        except socket.gaierror as e:
+            self.last_error = f"DNS {host}: {e}"
+        except OSError as e:
+            self.last_error = f"socket {host}:{port}: {e}"
         except Exception as e:
             self.last_error = str(e)
-            self._emit(f"Connect failed: {e}")
-            logger.error(f"stratum connect: {e}")
-            return False
+        self._emit(f"Connect failed: {self.last_error}")
+        logger.error("stratum connect: %s", self.last_error)
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+        self._sock = None
+        return False
 
     def _rebuild_prefix(self):
         job = self._job
         if not job or not self._en1_ready:
             self._header_prefix = None
+            self.job_ready = False
             return
         try:
             en2_size = max(1, int(self._extranonce2_size))
@@ -137,13 +206,20 @@ class StratumCpuMiner:
             merkle_le = merkle[::-1]
             ntime = struct.pack("<I", int(job["ntime"], 16))
             nbits = struct.pack("<I", int(job["nbits"], 16))
-            self._header_prefix = version + prevhash + merkle_le + ntime + nbits
+            prefix = version + prevhash + merkle_le + ntime + nbits
+            self._header_prefix = prefix
             self._job_id = job["job_id"]
             self._target = _diff_to_target(self._difficulty)
+            self.job_ready = len(prefix) == 76
+            if self._prefix_buf is not None and self.job_ready:
+                for i, b in enumerate(prefix):
+                    self._prefix_buf[i] = b
+                self._prefix_ready.value = 1
         except Exception as e:
-            logger.warning(f"rebuild prefix: {e}")
+            logger.warning("rebuild prefix: %s", e)
             self.last_error = f"prefix: {e}"
             self._header_prefix = None
+            self.job_ready = False
 
     def _handle_line(self, raw: str):
         try:
@@ -166,17 +242,9 @@ class StratumCpuMiner:
                         "ntime": params[7],
                     }
                     self._rebuild_prefix()
-                if self.comms is not None:
-                    try:
-                        from .job_ledger import JobLedger
-
-                        host, _ = _parse_pool(self.pool_url)
-                        entry = JobLedger(self.comms).record(params, coin=self.coin, pool_host=host)
-                        self._emit(f"Job score={entry.get('score')} id={str(entry.get('job_id'))[:12]}")
-                    except Exception:
-                        pass
-                if self._header_prefix:
+                if self.job_ready:
                     self._emit("Job ready — hashing")
+                    self.last_error = ""
         elif method == "mining.set_difficulty":
             try:
                 self._difficulty = float((msg.get("params") or [1])[0])
@@ -185,26 +253,26 @@ class StratumCpuMiner:
                 self._emit(f"Difficulty set to {self._difficulty}")
             except Exception:
                 pass
-        elif msg.get("id") is not None and "result" in msg:
+        elif msg.get("id") is not None:
+            if msg.get("error"):
+                self.last_error = str(msg.get("error"))
+                self._emit(f"RPC error: {self.last_error}")
+                return
             res = msg.get("result")
-            if isinstance(res, list) and len(res) >= 3:
-                en1 = res[1]
-                if isinstance(en1, str):
-                    with self._job_lock:
-                        self._extranonce1 = en1
-                        self._en1_ready = True
-                        try:
-                            self._extranonce2_size = int(res[2])
-                        except Exception:
-                            self._extranonce2_size = 4
-                        self._rebuild_prefix()
-                    self._emit(f"Subscribed en1_len={len(en1)} en2_size={self._extranonce2_size}")
-            if msg.get("result") is True:
+            if res is True:
+                self.authorized = True
                 self._emit("Authorized")
+                return
+            if res is False:
+                self.last_error = "authorize rejected — check MINING_WALLET"
+                self._emit(self.last_error)
+                return
+            self._apply_subscribe(res)
 
     def _reader_loop(self):
         buf = ""
-        assert self._sock
+        if not self._sock:
+            return
         while not self._stop.is_set():
             try:
                 chunk = self._sock.recv(8192)
@@ -224,48 +292,11 @@ class StratumCpuMiner:
                 self._emit(f"Reader error: {e}")
                 break
 
-    def _mine_loop(self, tid: int):
-        nonce = tid
-        step = max(1, self.threads)
-        while not self._stop.is_set():
-            with self._job_lock:
-                prefix = self._header_prefix
-                target = self._target
-                job_id = self._job_id
-                en2 = self._current_en2
-                ntime = self._job["ntime"] if self._job else None
-            if not prefix:
-                time.sleep(0.05)
-                continue
-            local = 0
-            for _ in range(50_000):
-                if self._stop.is_set():
-                    break
-                header = prefix + struct.pack("<I", nonce & 0xFFFFFFFF)
-                h = _sha256d(header)
-                local += 1
-                if int.from_bytes(h[::-1], "big") <= target:
-                    self._submit(job_id, en2.hex(), ntime, nonce)
-                nonce = (nonce + step) & 0xFFFFFFFF
-            with self._hashes_lock:
-                self._hashes += local
-
-    def _submit(self, job_id, en2_hex, ntime, nonce):
-        try:
-            self._rpc(
-                "mining.submit",
-                [self.username, job_id, en2_hex, ntime, f"{nonce:08x}"],
-            )
-            self._emit(f"Share submitted nonce={nonce:08x} job={job_id}")
-        except Exception as e:
-            self._emit(f"Submit failed: {e}")
-
     def _hr_loop(self):
         while not self._stop.is_set():
-            time.sleep(2.0)
+            time.sleep(1.5)
             now = time.time()
-            with self._hashes_lock:
-                total = self._hashes
+            total = int(self._hash_counter.value)
             delta = total - self._last_hr_hashes
             self._last_hr_hashes = total
             dt = max(0.001, now - self._last_hr_t)
@@ -279,25 +310,62 @@ class StratumCpuMiner:
             else:
                 self._emit(f"{rate:.0f} H/s")
 
-    def start(self) -> bool:
-        self._stop.clear()
-        self._en1_ready = False
-        if not self.connect():
-            return False
-        self._reader = threading.Thread(target=self._reader_loop, name="stratum-reader", daemon=True)
-        self._reader.start()
-        self._hr_thread = threading.Thread(target=self._hr_loop, name="stratum-hr", daemon=True)
-        self._hr_thread.start()
+    def _spawn_workers(self):
+        from multiprocessing import Array
+
+        self._stop_flag.value = 0
+        self._hash_counter.value = 0
+        self._prefix_buf = Array("B", 76)
+        dummy = b"\x00" * 76
+        for i, b in enumerate(dummy):
+            self._prefix_buf[i] = b
+        if self.offline:
+            self._prefix_ready.value = 1
         self._workers = []
         for i in range(self.threads):
-            t = threading.Thread(target=self._mine_loop, args=(i,), name=f"cpu-mine-{i}", daemon=True)
-            t.start()
-            self._workers.append(t)
-        self._emit(f"CPU miner workers={self.threads} cores={os.cpu_count()}")
+            p = Process(
+                target=_hash_process,
+                args=(
+                    i,
+                    self.threads,
+                    self._stop_flag,
+                    self._hash_counter,
+                    self._prefix_buf,
+                    self._prefix_ready,
+                ),
+                name=f"cpu-mine-{i}",
+                daemon=True,
+            )
+            p.start()
+            self._workers.append(p)
+        self._emit(f"CPU hasher processes={self.threads} cores={os.cpu_count()} offline={self.offline}")
+
+    def start(self) -> bool:
+        self._stop.clear()
+        self._en1_ready = self.offline
+        self.job_ready = self.offline
+        if not self.connect():
+            return False
+        self._spawn_workers()
+        if not self.offline:
+            self._reader = threading.Thread(target=self._reader_loop, name="stratum-reader", daemon=True)
+            self._reader.start()
+        self._hr_thread = threading.Thread(target=self._hr_loop, name="stratum-hr", daemon=True)
+        self._hr_thread.start()
         return True
 
     def stop(self):
         self._stop.set()
+        try:
+            self._stop_flag.value = 1
+        except Exception:
+            pass
+        for p in self._workers:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        self._workers = []
         try:
             if self._sock:
                 self._sock.close()
@@ -305,6 +373,11 @@ class StratumCpuMiner:
             pass
         self._sock = None
         self._hashrate_hs = 0.0
+        self.job_ready = False
 
     def running(self) -> bool:
-        return not self._stop.is_set() and self._sock is not None
+        if self._stop.is_set():
+            return False
+        if self.offline:
+            return any(p.is_alive() for p in self._workers)
+        return self._sock is not None
