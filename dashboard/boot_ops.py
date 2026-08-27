@@ -88,16 +88,12 @@ def boot(
     except Exception as e:
         logger.warning(f"ops_native: {e}")
 
-    # DO NOT install mining_engine_ops — mining_standalone owns those paths
-
     try:
         from dashboard.mining_coins_ops import install_mining_coins_ops
 
         install_mining_coins_ops(app, get_comms=get_comms)
     except Exception as e:
         logger.warning(f"mining_coins_ops: {e}")
-
-    # DO NOT install status_live over /status — dashboard.py serves mining-aware /status
 
     try:
         from mods.bvl.economy import start_economy
@@ -106,7 +102,6 @@ def boot(
     except Exception as e:
         logger.warning(f"economy: {e}")
 
-    # Auto-mine OFF unless env forces it
     try:
         from dashboard.auto_mine import start_auto_mine
 
@@ -129,13 +124,20 @@ def boot(
         logger.warning(f"stability: {e}")
 
     try:
+        from mods.mine_governor.agent import start_governor
+
+        start_governor(get_comms)
+    except Exception as e:
+        logger.warning(f"mine_governor: {e}")
+
+    try:
         from mods.btc_identity.identity import NodeIdentity
 
         NodeIdentity(get_comms()).register_with_identity(
-            capabilities=["dashboard", "mesh", "mining_engine", "chat", "btc_identity"]
+            capabilities=["dashboard", "mesh", "mining_engine", "chat", "btc_identity", "mine_governor"]
         )
     except Exception as e:
         logger.warning(f"auto identity: {e}")
 
     app.state.aurora_booted = True
-    logger.info("boot complete (mining_standalone is authority for mine routes)")
+    logger.info("boot complete (mining_standalone + mine_governor)")

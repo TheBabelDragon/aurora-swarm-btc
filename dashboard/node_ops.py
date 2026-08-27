@@ -71,6 +71,7 @@ def install_node_ops(app: Any, *, get_comms: Callable[[], Any], get_identity: Op
             body["factor"] = factor
         if intensity is not None:
             body["intensity"] = intensity
+            body["threads"] = intensity
 
         try:
             if action == "chat":
@@ -90,9 +91,11 @@ def install_node_ops(app: Any, *, get_comms: Callable[[], Any], get_identity: Op
                     "balance": BabelLedger(comms).balance(node_id),
                 }
 
-            # mining / fleet commands
             comms.send_to_node(node_id, body)
-            # also publish worker command channel used by engines
+            try:
+                comms.set_state(f"minecmd:{node_id}", {**body, "_done": False}, expire=180)
+            except Exception:
+                pass
             try:
                 from comms.layer import SwarmMessage
 
@@ -108,7 +111,6 @@ def install_node_ops(app: Any, *, get_comms: Callable[[], Any], get_identity: Op
 
     @app.get("/comms/global")
     def global_stats():
-        """Live collective snapshot — compute + BVL on shared Redis."""
         comms = get_comms()
         peers = comms.get_active_nodes() or []
         total_hs = 0.0
