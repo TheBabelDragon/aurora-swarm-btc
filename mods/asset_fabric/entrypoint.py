@@ -12,10 +12,12 @@ def register():
     # The durable verb is "asset"; torrent remains an implementation detail.
     try:
         from mods.torrent_protocol.hooks.on_asset_needed import on_asset_needed
+
         registry.register("on_asset_needed", on_asset_needed)
-        registry.register("on_asset_ensure", on_asset_needed)  # alias
+        registry.register("on_asset_ensure", on_asset_needed)
     except Exception as e:
-        print(f"[MOD] asset_fabric: could not wire on_asset_needed: {e}")
+        # Redis / pydantic are optional at import time on a CPU smoke box.
+        print(f"[MOD] asset_fabric: on_asset_needed deferred ({e.__class__.__name__})")
 
     print("[MOD] asset_fabric v0.1.0 registered — ensure() is the public verb")
 
