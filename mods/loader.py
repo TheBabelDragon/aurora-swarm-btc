@@ -5,6 +5,7 @@ Loads enabled mods and registers their hooks.
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import logging
@@ -12,6 +13,26 @@ import sys
 from pathlib import Path
 
 logger = logging.getLogger("aurora.mods")
+
+
+def _exec_entrypoint(mod_dir: Path, entry_path: Path, mod_name: str):
+    """Prefer package import so relative imports inside mods work."""
+    pkg_name = f"mods.{mod_dir.name}"
+    entry_mod = entry_path.stem
+    module_name = f"{pkg_name}.{entry_mod}"
+
+    try:
+        return importlib.import_module(module_name)
+    except Exception as pkg_exc:
+        logger.debug("package import failed for %s (%s); falling back to file spec", module_name, pkg_exc)
+
+    spec = importlib.util.spec_from_file_location(f"aurora_mod_{mod_name}", entry_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load spec for {mod_name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_mods(mods_dir: str = "mods") -> dict:
@@ -51,16 +72,15 @@ def load_mods(mods_dir: str = "mods") -> dict:
                 logger.error("Missing entry for %s: %s", mod_name, entry_path)
                 continue
 
-            spec = importlib.util.spec_from_file_location(
-                f"aurora_mod_{mod_name}", entry_path
-            )
-            if spec is None or spec.loader is None:
-                logger.error("Could not load spec for %s", mod_name)
-                continue
+            # Make `from .hooks...` work even if the mod had no package marker.
+            init_py = mod_dir / "__init__.py"
+            if not init_py.exists():
+                init_py.write_text("")
+            hooks_dir = mod_dir / "hooks"
+            if hooks_dir.is_dir() and not (hooks_dir / "__init__.py").exists():
+                (hooks_dir / "__init__.py").write_text("")
 
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module
-            spec.loader.exec_module(module)
+            module = _exec_entrypoint(mod_dir, entry_path, mod_name)
 
             if hasattr(module, "register"):
                 module.register()

@@ -16,9 +16,11 @@ from scheduler.hook_registry import HookRegistry  # noqa: E402
 
 
 class LoaderTests(unittest.TestCase):
-    def test_loader_finds_metafield_bridge(self):
+    def test_loader_finds_core_mods(self):
         loaded = load_mods(str(ROOT / "mods"))
         self.assertIn("metafield_bridge", loaded)
+        self.assertIn("thermal_aware_scheduler", loaded)
+        self.assertIn("gpu_utilization_balancer", loaded)
         self.assertTrue(loaded["metafield_bridge"].get("enabled"))
 
 
