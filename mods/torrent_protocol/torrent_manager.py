@@ -262,14 +262,25 @@ class TorrentManager:
         logger.info(f"Created torrent {infohash[:12]}… name={safe_name} pieces={len(piece_hashes)}")
         return meta
 
-    def announce(self, infohash: str) -> bool:
+    def announce(self, infohash: str, temporal: Optional[Dict[str, Any]] = None) -> bool:
         meta = self.torrents.get(infohash)
         if not meta:
             return False
         try:
-            msg = SwarmMessage(type="torrent.announce", payload=meta.to_dict(), source=self.node_id)
+            payload = meta.to_dict()
+            # Temporal metadata is provenance only. Scheduling ignores it.
+            payload["asset_id"] = infohash
+            if temporal:
+                payload["manifest_hash"] = temporal.get("manifest_hash") or payload.get("manifest_hash")
+                payload["epoch"] = temporal.get("epoch")
+                payload["anchor_id"] = temporal.get("anchor_id")
+            else:
+                payload.setdefault("manifest_hash", payload.get("manifest_hash"))
+                payload.setdefault("epoch", None)
+                payload.setdefault("anchor_id", None)
+            msg = SwarmMessage(type="torrent.announce", payload=payload, source=self.node_id)
             self.comms.publish_message("torrent.announce", msg)
-            self.comms.set_state(f"torrent:{infohash}", meta.to_dict(), expire=7200)
+            self.comms.set_state(f"torrent:{infohash}", payload, expire=7200)
             return True
         except Exception as e:
             logger.error(f"announce failed: {e}")
@@ -476,10 +487,23 @@ class TorrentManager:
             if msg.source == self.node_id:
                 return
             payload = msg.payload or {}
-            infohash = payload.get("infohash")
+            infohash = payload.get("infohash") or payload.get("asset_id")
             if not infohash:
                 return
+            # Store transport metadata. Peer-supplied epoch/anchor_id is a claim,
+            # never local clock truth, and never a scheduling input.
             self.comms.set_state(f"torrent:{infohash}", payload, expire=7200)
+            claim = {
+                "epoch": payload.get("epoch"),
+                "anchor_id": payload.get("anchor_id"),
+                "manifest_hash": payload.get("manifest_hash"),
+                "from": msg.source,
+                "verified": False,
+            }
+            try:
+                self.comms.set_state(f"torrent:claim:{infohash}:{msg.source}", claim, expire=7200)
+            except Exception:
+                pass
             num = payload.get("num_pieces") or len(payload.get("piece_hashes", []))
             for idx in range(int(num)):
                 self.rarity[infohash][idx] += 1
