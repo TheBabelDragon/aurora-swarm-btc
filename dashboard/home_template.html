@@ -103,6 +103,20 @@ a{color:#0f0}
 <div id="torrent_summary" class="muted"></div>
 </div>
 
+<div class="card"><h2>Artifact Swarm</h2>
+<p class="muted">Artifact anchored at a Bitcoin epoch — Bitcoin is not the store, not the torrent, and not the identity.</p>
+<div id="artifact_tip" class="muted" style="margin-bottom:8px">No Bitcoin tip yet (unanchored artifacts remain valid).</div>
+<div style="overflow-x:auto">
+<table>
+<thead><tr>
+<th>Asset</th><th>Pieces</th><th>Possession</th><th>Epoch</th>
+<th>BTC Height</th><th>Anchor Status</th><th>Confirmations</th><th>Canonical</th>
+</tr></thead>
+<tbody id="artifact_rows"><tr><td colspan="8" class="muted">No artifacts yet — upload to seed.</td></tr></tbody>
+</table>
+</div>
+</div>
+
 <div class="card"><h2>Nodes</h2><pre id="nodes"></pre></div>
 <div class="card"><h2>Events</h2><pre id="events"></pre></div>
 <div class="card"><h2>Fleet Commands</h2>
@@ -186,6 +200,36 @@ if(v.balances_global){document.getElementById('bvl_status').textContent='BVL loc
 }catch(e){}
 document.getElementById('nodes').innerText=JSON.stringify(await fetch('/nodes').then(function(r){return r.json();}),null,2);
 document.getElementById('events').innerText=JSON.stringify(await fetch('/events?limit=8').then(function(r){return r.json();}),null,2);
+try{
+  var ts=await fetch('/torrent/status').then(function(r){return r.json();});
+  var tip=document.getElementById('artifact_tip');
+  var ch=ts.chain||{};
+  if(ch.height!=null){
+    tip.className='success';
+    tip.textContent='Artifact anchored at Bitcoin epoch '+ch.height+' · work '+(ch.work||'—')+' · '+(ch.block_hash||'').slice(0,16);
+  }else{
+    tip.className='muted';
+    tip.textContent='No Bitcoin tip — artifacts remain valid without an epoch.';
+  }
+  var tb=document.getElementById('artifact_rows');
+  var arts=ts.artifacts||[];
+  if(!arts.length){tb.innerHTML='<tr><td colspan="8" class="muted">'+(ts.note||'No artifacts yet')+'</td></tr>';}
+  else{
+    tb.innerHTML=arts.map(function(a){
+      var canon=a.reorged?'Reorged':(a.canonical?'Canonical':'Observed');
+      return '<tr>'
+        +'<td class="mono">'+(a.asset||'')+'</td>'
+        +'<td>'+(a.pieces||'')+'</td>'
+        +'<td>'+(a.possession||'')+'</td>'
+        +'<td>'+(a.epoch==null?'—':a.epoch)+'</td>'
+        +'<td>'+(a.btc_height==null?'—':a.btc_height)+'</td>'
+        +'<td>'+(a.anchor_status||'none')+'</td>'
+        +'<td>'+(a.confirmations==null?'—':a.confirmations)+'</td>'
+        +'<td>'+canon+'</td>'
+        +'</tr>';
+    }).join('');
+  }
+}catch(e){}
 nccRefreshNodes(); refreshMine(); refreshMeta();
 }catch(e){console.error(e);}}
 

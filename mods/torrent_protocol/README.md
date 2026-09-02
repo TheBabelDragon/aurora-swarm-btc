@@ -1,12 +1,24 @@
-# torrent_protocol Mod  v0.4.0 — Maximum Resilience
+# torrent_protocol Mod  v0.5.1 — Maximum Resilience
 
 **Swarm-native piece distribution** inspired by BitTorrent.
 
 > **Prefer the higher-level API.**  
-> New code should speak through `mods.asset_fabric` (`ensure`, `publish`, `possession`).  
+> New code should speak through `mods.asset_fabric` (`ensure`, `publish`, `possession`, `history`, `clock`, `verify`).  
 > This module is the current **transport implementation** of the Asset Fabric.
 
 Zero external BitTorrent dependencies. Everything rides on the existing CommsLayer mesh.
+
+Bitcoin scarcity is a temporal/provenance layer, not a transport scheduler.
+Rarest-first remains rarest-first. Piece transfer does not depend on Bitcoin.
+
+Announcements may carry optional clock metadata:
+
+```
+asset_id, manifest_hash, epoch, anchor_id
+```
+
+Peer-supplied epoch/anchor on an announce is an unverified claim. It is never
+local clock truth and is never a scheduling input.
 
 ## Why this is the strongest version
 
@@ -22,6 +34,7 @@ Zero external BitTorrent dependencies. Everything rides on the existing CommsLay
 | Automatic meta re-fetch | ✅ |
 | Stall detection + recovery | ✅ |
 | Scheduler `on_asset_needed` | ✅ |
+| Clock metadata on announce | ✅ (ignored by scheduler) |
 
 ## Recommended usage (transport level)
 
@@ -62,6 +75,9 @@ Every ~8 seconds the maintainer:
 2. Detects stalls (no new pieces for 90 s) and forces a recovery
 3. Keeps request pipelines full
 
+Torrent transfer works with the BTC layer disabled. The BTC layer works
+without torrent transfer.
+
 ## Status
 
-v0.4.0 — transport implementation under Asset Fabric. Still experimental (mods/).
+v0.5.1 — transport implementation under Asset Fabric. Still experimental (mods/).

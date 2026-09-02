@@ -87,11 +87,40 @@ def install_truth_routes(
         if tm is not None and capable_count == 0:
             capable_count = 1
 
+        artifacts = []
+        if fabric:
+            try:
+                for row in fabric.list_assets():
+                    clock = row.get("clock") or {}
+                    artifacts.append(
+                        {
+                            "asset": row.get("name") or (row.get("asset_id") or "")[:12],
+                            "asset_id": row.get("asset_id"),
+                            "pieces": f"{row.get('have', 0)}/{row.get('total', 0)}",
+                            "possession": row.get("possession_state"),
+                            "epoch": clock.get("epoch"),
+                            "btc_height": clock.get("btc_height"),
+                            "anchor_status": clock.get("confidence"),
+                            "confirmations": (row.get("anchor") or {}).get("confirmations"),
+                            "canonical": clock.get("confidence") == "confirmed",
+                            "reorged": clock.get("confidence") == "reorged",
+                        }
+                    )
+            except Exception as e:
+                logger.debug(f"artifact clock rows: {e}")
+
         note = ""
         if not tm:
             note = "torrent manager offline"
         elif not local:
             note = "no local torrents yet — upload to seed"
+
+        chain = None
+        if fabric and hasattr(fabric, "current_clock"):
+            try:
+                chain = fabric.current_clock()
+            except Exception:
+                chain = None
 
         return {
             "torrent_capable_nodes": capable_count,
@@ -103,6 +132,8 @@ def install_truth_routes(
             "downloading": downloading,
             "seeding": seeding,
             "announced_torrents": announced,
+            "artifacts": artifacts,
+            "chain": chain,
             "dashboard_has_manager": tm is not None,
             "dashboard_has_anchor": get_anchor() is not None,
             "dashboard_has_fabric": fabric is not None,

@@ -135,15 +135,34 @@ def attach_byzantine_receive(manager: Any) -> bool:
 
             meta = manager.torrents.get(infohash)
             path = manager.get_path(infohash)
+            clock_meta = {}
+            try:
+                raw = manager.comms.get_state(f"asset:anchor:{infohash}")
+                if isinstance(raw, dict):
+                    clock_meta = {
+                        "epoch": raw.get("artifact_epoch") or raw.get("btc_height"),
+                        "btc_anchor": raw.get("anchor_id"),
+                        "manifest_hash": raw.get("manifest_hash"),
+                    }
+            except Exception:
+                pass
             msg = SwarmMessage(
                 type="asset.complete",
                 payload={
                     "infohash": infohash,
                     "asset_id": infohash,
+                    "manifest_hash": clock_meta.get("manifest_hash") or (meta.infohash if meta else infohash),
+                    "peer_id": manager.node_id,
+                    "node_id": manager.node_id,
                     "name": meta.name if meta else "",
                     "size": meta.size if meta else 0,
-                    "node_id": manager.node_id,
                     "path": str(path) if path else "",
+                    "possession_proof": {
+                        "complete": True,
+                        "pieces": len(meta.piece_hashes) if meta else 0,
+                    },
+                    "epoch": clock_meta.get("epoch"),
+                    "btc_anchor": clock_meta.get("btc_anchor"),
                 },
                 source=manager.node_id,
             )

@@ -56,5 +56,17 @@ def mount_optional_ops(
     except Exception as e:
         logger.warning(f"btc_ops: {e}")
 
+    try:
+        m = _import_mount("clock_ops")
+        m.mount_clock_ops(
+            app,
+            get_comms=get_comms,
+            get_torrent_manager=get_torrent_manager,
+            get_anchor=get_anchor,
+        )
+        mounted.append("clock")
+    except Exception as e:
+        logger.warning(f"clock_ops: {e}")
+
     logger.info(f"optional ops mounted: {mounted or 'NONE'}")
     return mounted

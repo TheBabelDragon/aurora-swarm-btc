@@ -1,8 +1,10 @@
 """
 Background epoch commit tick.
 
-Periodically builds and commits an epoch root so the swarm's verified
-state is externally timestampable via btc_anchor.
+An epoch tick is deterministic from the Bitcoin chain / anchor state.
+It is never derived from time.time(), peer arrival, or torrent completion.
+The interval only controls how often we *observe* the chain; the epoch
+coordinate itself is the chain tip.
 """
 
 from __future__ import annotations
@@ -10,7 +12,6 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import time
 from typing import Any, Optional
 
 from comms.layer import CommsLayer
@@ -32,6 +33,7 @@ class EpochTicker:
         topology_registry: Any = None,
         policy: Any = None,
         request_broadcast: bool = False,
+        chain: Any = None,
     ):
         self.comms = comms
         self.interval = max(60.0, float(interval))
@@ -39,6 +41,7 @@ class EpochTicker:
         self.topology_registry = topology_registry
         self.policy = policy
         self.request_broadcast = request_broadcast
+        self.chain = chain
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.last_result: Optional[dict] = None
@@ -57,7 +60,7 @@ class EpochTicker:
             self._thread.join(timeout=5.0)
 
     def tick_once(self) -> dict:
-        b = EpochBuilder(self.comms)
+        b = EpochBuilder(self.comms, chain=self.chain)
         epoch = b.from_local_state(
             possession=self.possession,
             topology_registry=self.topology_registry,
@@ -66,11 +69,14 @@ class EpochTicker:
         )
         result = b.commit(epoch, request_broadcast=self.request_broadcast)
         self.last_result = result
-        logger.info(f"Epoch committed root={(result.get('epoch_root') or '')[:16]}…")
+        ce = (result.get("epoch") or {}) if isinstance(result.get("epoch"), dict) else {}
+        logger.info(
+            f"Epoch committed root={(result.get('epoch_root') or '')[:16]}… "
+            f"height={ce.get('height')} hash={(ce.get('block_hash') or '')[:12]}"
+        )
         return result
 
     def _loop(self):
-        # stagger first tick slightly
         self._stop.wait(min(30.0, self.interval / 10))
         while not self._stop.is_set():
             try:

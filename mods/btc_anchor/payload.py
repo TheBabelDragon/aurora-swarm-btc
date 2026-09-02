@@ -5,26 +5,32 @@ Design goals:
 - Fit comfortably in OP_RETURN (≤80 bytes payload is ideal; we keep a short form)
 - Be unambiguous and versioned
 - Allow batching later via Merkle roots without breaking v1 single-asset form
+- Bind artifact identity to an epoch without storing the artifact
 
 Short form (default):
   AURORA1|<16-hex commitment prefix>
+
+Artifact-clock form (still ≤80 bytes):
+  AURORA1C|<16-hex commitment>|<epoch>
 
 Full form (for logs / external indexers, not necessarily on-chain):
   {
     "v": 1,
     "c": "<64-hex commitment>",
     "a": "<asset_id prefix>",
-    "t": <unix ts>
+    "e": <artifact_epoch>,
+    "m": "<manifest_hash prefix>",
+    "t": <observational unix ts>
   }
 """
 
 from __future__ import annotations
 
 import json
-import time
 from typing import Any, Dict, Optional
 
 MAGIC = "AURORA1"
+MAGIC_CLOCK = "AURORA1C"
 OP_RETURN_MAX = 80
 
 
@@ -43,20 +49,37 @@ def short_op_return_payload(commitment: str) -> bytes:
     return raw
 
 
+def artifact_op_return_payload(commitment: str, artifact_epoch: int) -> bytes:
+    """Compact on-chain form that also carries the claimed epoch."""
+    prefix = commitment.lower().replace("0x", "")[:16]
+    s = f"{MAGIC_CLOCK}|{prefix}|{int(artifact_epoch)}"
+    raw = s.encode("ascii")
+    if len(raw) > OP_RETURN_MAX:
+        raise ValueError("OP_RETURN payload too large")
+    return raw
+
+
 def full_record_payload(
     commitment: str,
     asset_id: str,
     *,
     ts: Optional[float] = None,
     extra: Optional[Dict[str, Any]] = None,
+    artifact_epoch: Optional[int] = None,
+    manifest_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Richer off-chain / indexer-friendly record."""
-    body = {
+    """Richer off-chain / indexer-friendly record. `ts` is observational only."""
+    body: Dict[str, Any] = {
         "v": 1,
         "c": commitment.lower().replace("0x", ""),
         "a": asset_id[:40],
-        "t": int(ts or time.time()),
     }
+    if artifact_epoch is not None:
+        body["e"] = int(artifact_epoch)
+    if manifest_hash:
+        body["m"] = str(manifest_hash)[:40]
+    if ts is not None:
+        body["t"] = int(ts)
     if extra:
         body["x"] = extra
     return body
@@ -72,9 +95,17 @@ def parse_short_payload(data: bytes) -> Optional[str]:
         s = data.decode("ascii")
     except Exception:
         return None
-    if not s.startswith(MAGIC + "|"):
+    if s.startswith(MAGIC_CLOCK + "|"):
+        parts = s.split("|")
+        if len(parts) < 2:
+            return None
+        prefix = parts[1].strip().lower()
+    elif s.startswith(MAGIC + "|"):
+        prefix = s.split("|", 1)[1].strip().lower()
+        if "|" in prefix:
+            prefix = prefix.split("|", 1)[0]
+    else:
         return None
-    prefix = s.split("|", 1)[1].strip().lower()
     if len(prefix) < 8 or any(c not in "0123456789abcdef" for c in prefix):
         return None
     return prefix

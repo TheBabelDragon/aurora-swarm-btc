@@ -1,49 +1,39 @@
-# Aurora Architecture (one page)
+# Architecture
 
-```text
-                    AURORA SWARM
-                         │
-          ┌──────────────┼──────────────┐
-          │              │              │
-    Control Plane   Data Plane    Settlement
-          │              │              │
-     registry        assets          BVL
-     scheduler       pieces          LN (opt)
-     thermal         manifests       epoch→BTC
-     commands        RS / repair     mining events
-          │              │              │
-          └──────────────┼──────────────┘
-                         │
-                    CommsLayer
-                         │
-              ┌──────────┼──────────┐
-              ▼          ▼          ▼
-            Node A     Node B     Node C
+```
+BTC proof-of-work chain
+      │
+      ▼
+btc_anchor                 canonical temporal / scarcity anchor
+      │
+      ▼
+asset_fabric               artifact object, possession, history, clock
+      │
+      ▼
+torrent_protocol           piece distribution
+      │
+      ▼
+swarm peers
 ```
 
-## Data plane rule
+Do not invert this dependency. New code speaks `ensure` / `publish` /
+`possession` / `history` / `clock` / `verify`. Torrent remains the
+transport implementation.
 
-> Never trust a node’s statement about data.  
-> Trust independently verifiable content.
+## Separation of concerns
 
-- **Claimed ≠ available** — only challenge/Merkle-verified possession counts  
-- **Replication ≠ durability** — topology diversity + Reed–Solomon  
-- **Bitcoin ≠ blob store** — timestamps epoch roots; does not host assets  
-- **Mining provenance ≠ hardware on-chain** — progressive evidence only  
+| Layer | Defines | Does not define |
+|-------|---------|-----------------|
+| CONTENT | immutable artifact identity | when it existed |
+| FABRIC | lifecycle, verified possession | wall-clock time |
+| TORRENT | piece movement, rarest-first | Bitcoin epochs |
+| BTC | scarce external ordering | artifact bytes / identity |
+| HISTORY | append-only memory | canonical chain status |
 
-## Key endpoints
+`asset_id` is content-addressed. `anchor_id` is a temporal observation.
+A peer saying "asset X existed at block 900000" is evidence to verify,
+not truth.
 
-| Concern | Endpoint |
-|---------|----------|
-| Who holds asset | `GET /fabric/who` |
-| Repair | `POST /fabric/repair` |
-| Reconstruct RS | `POST /fabric/reconstruct` |
-| Epoch commit | `POST /fabric/epoch` |
-| Mining who | `GET /mining/who?epoch=` |
-| Mining provenance | `GET /mining/provenance/<txid>` |
-| BVL status | `GET /bvl/status` |
-
-## Mod promotion path
-
-Experiment in `mods/` → stabilize → promote durable abstraction to core.  
-See `mods/README.md` and `docs/PROBLEMS_SOLVED.md`.
+An artifact can live without Bitcoin. Bitcoin can anchor an artifact
+without storing it. Torrent can transport an artifact without
+understanding Bitcoin.
