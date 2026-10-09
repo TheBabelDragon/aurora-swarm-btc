@@ -7,6 +7,55 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger("aurora-dashboard.boot")
 
 
+def _init_destination_routing(get_comms: Callable[[], Any]) -> None:
+    """Wire DestinationRoutingService to live mesh node_lookup + mesh_send."""
+    try:
+        from comms.routing.service import get_routing_service, init_routing_service
+
+        if get_routing_service() is not None:
+            return
+
+        def _node_lookup(nid: str):
+            try:
+                nodes = get_comms().get_active_nodes() or []
+                for n in nodes:
+                    if (n.get("node_id") or "") == nid:
+                        return n
+            except Exception:
+                pass
+            return None
+
+        def _mesh_send(target_id: str, payload: Any) -> bool:
+            """Deliver via CommsLayer.send_to_node; returns True on publish."""
+            try:
+                from comms.layer import SwarmMessage
+
+                comms = get_comms()
+                if not hasattr(comms, "send_to_node"):
+                    return False
+                msg = payload
+                if not isinstance(payload, SwarmMessage):
+                    msg = SwarmMessage(
+                        type="route.mesh",
+                        payload=payload if isinstance(payload, dict) else {"data": payload},
+                        source=getattr(comms, "node_id", None),
+                        target=target_id,
+                    )
+                comms.send_to_node(target_id, msg)
+                return True
+            except Exception as e:
+                logger.debug("mesh_send failed: %s", e)
+                return False
+
+        svc = init_routing_service(node_lookup=_node_lookup, mesh_send=_mesh_send)
+        logger.info(
+            "destination routing initialized (enabled=%s)",
+            bool(svc.config.enabled),
+        )
+    except Exception as e:
+        logger.warning("destination routing init skipped: %s", e)
+
+
 def boot(
     app: Any,
     *,
@@ -146,5 +195,7 @@ def boot(
     except Exception as e:
         logger.warning(f"auto identity: {e}")
 
+    _init_destination_routing(get_comms)
+
     app.state.aurora_booted = True
-    logger.info("boot complete (mining_standalone + mine_governor)")
+    logger.info("boot complete (mining_standalone + mine_governor + routing)")
