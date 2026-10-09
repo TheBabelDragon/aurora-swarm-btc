@@ -2,7 +2,7 @@
 
 Aurora peers through **shared Redis**. LAN **UDP discovery** (port **7379**) auto-announces join URLs.
 
-Beacons are HMAC-signed. Set the **same** `AURORA_MESH_SECRET` on every node and `AURORA_MESH_REQUIRE_AUTH=1` so a random box on Wi‑Fi cannot advertise a fake Redis and steal the mesh.
+Beacons are HMAC-signed. Set the **same** `AURORA_MESH_SECRET` on every node and `AURORA_MESH_REQUIRE_AUTH=1` so a random box on Wi-Fi cannot advertise a fake Redis and steal the mesh.
 
 After a node joins the leader, it **re-advertises the leader Redis URL** (not its own empty instance). That was the split-brain bug.
 
@@ -43,7 +43,7 @@ export AURORA_MESH_REQUIRE_AUTH=1
 docker compose -f docker-compose.solo.yml up -d --build
 ```
 
-Open **TCP 6379** and **UDP 7379** between machines. Guest Wi‑Fi AP isolation will silently kill discovery.
+Open **TCP 6379** and **UDP 7379** between machines. Guest Wi-Fi AP isolation will silently kill discovery.
 
 ## If LAN count stays 0
 
@@ -54,3 +54,15 @@ curl -s http://127.0.0.1:8000/comms/discovery | python -m json.tool
 ```
 
 `listen_ok` must be true. If bind failed, something else owns UDP 7379.
+
+
+## Destination routing (v0.1)
+
+Optional subsystem under `comms/routing/`. Disabled by default.
+
+- Resolves service IDs, node IDs, hostnames, IP literals, and content IDs.
+- Gateway capability advertisements are authenticated claims (not automatic routes).
+- Local mesh continues without public connectivity.
+- Egress gateway is opt-in, policy-bound, and not an open proxy.
+
+See `docs/DESTINATION_ROUTING.md`. Diagnostics: `/comms/destinations/resolve`, `/comms/routes`, `/comms/gateways`, `/comms/network/status`.

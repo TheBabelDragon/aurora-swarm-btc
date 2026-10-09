@@ -29,17 +29,17 @@ Artifact history can be replicated independently.
 
 ```
 BTC proof-of-work chain
-      │
-      ▼
+      |
+      v
 btc_anchor          canonical temporal anchor
-      │
-      ▼
+      |
+      v
 asset_fabric        artifact epoch / possession history
-      │
-      ▼
+      |
+      v
 torrent_protocol    piece distribution
-      │
-      ▼
+      |
+      v
 swarm peers
 ```
 
@@ -70,6 +70,7 @@ docker compose -f docker-compose.solo.yml down
 | Piece | Role |
 |-------|------|
 | `comms/layer.py` | Mesh: register, heartbeat, targeted + broadcast messages |
+| `comms/routing/` | Optional destination discovery + gateway routing (off by default) |
 | `dashboard/` | Command UI + mining status truth + artifact clock panel |
 | `mods/mining_engine` | Stratum / CPU hashing path |
 | `mods/asset_fabric` | Durable asset object, possession, history, Bitcoin clock |
