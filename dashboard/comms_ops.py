@@ -1,4 +1,4 @@
-"""Comms Layer — status, discovery, export, chat, mesh join."""
+"""Comms Layer — status, discovery, export, chat, mesh join, destination routing."""
 
 from __future__ import annotations
 
@@ -273,6 +273,7 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
     def _routing():
         try:
             from comms.routing.service import get_routing_service, init_routing_service
+
             svc = get_routing_service()
             if svc is None:
                 def _node_lookup(nid):
@@ -284,7 +285,28 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
                     except Exception:
                         pass
                     return None
-                svc = init_routing_service(node_lookup=_node_lookup)
+
+                def _mesh_send(target_id: str, payload: Any) -> bool:
+                    try:
+                        from comms.layer import SwarmMessage
+
+                        comms = get_comms()
+                        if not hasattr(comms, "send_to_node"):
+                            return False
+                        msg = payload
+                        if not isinstance(payload, SwarmMessage):
+                            msg = SwarmMessage(
+                                type="route.mesh",
+                                payload=payload if isinstance(payload, dict) else {"data": payload},
+                                source=getattr(comms, "node_id", None),
+                                target=target_id,
+                            )
+                        comms.send_to_node(target_id, msg)
+                        return True
+                    except Exception:
+                        return False
+
+                svc = init_routing_service(node_lookup=_node_lookup, mesh_send=_mesh_send)
             return svc
         except Exception as e:
             logger.debug("routing service unavailable: %s", e)
@@ -334,4 +356,33 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
 
-    logger.info("comms_ops mounted (chat+join_mesh+export+routing)")
+    @app.post("/comms/route_send")
+    async def comms_route_send(request: Request):
+        """Resolve target and deliver over mesh (node/service only). No TCP egress."""
+        try:
+            ctype = (request.headers.get("content-type") or "").lower()
+            if "application/json" in ctype:
+                body = await request.json()
+                target = str(body.get("target") or "").strip()
+                payload = body.get("payload")
+                if payload is None and "text" in body:
+                    payload = {"text": body.get("text")}
+            else:
+                form = await request.form()
+                target = str(form.get("target") or "").strip()
+                text = str(form.get("text") or form.get("message") or "").strip()
+                payload = {"text": text} if text else None
+            if not target or len(target) > 512:
+                return JSONResponse({"ok": False, "error": "target required (max 512)"}, status_code=400)
+            svc = _routing()
+            if svc is None:
+                return JSONResponse({"ok": False, "error": "routing_unavailable"}, status_code=503)
+            out = svc.mesh_send_to(target, payload)
+            if not out.get("ok"):
+                return JSONResponse(out, status_code=400)
+            return out
+        except Exception as e:
+            logger.exception("route_send")
+            return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+    logger.info("comms_ops mounted (chat+join_mesh+export+routing+route_send)")
