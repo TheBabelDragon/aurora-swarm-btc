@@ -63,6 +63,8 @@ Optional subsystem under `comms/routing/`. Disabled by default.
 - Resolves service IDs, node IDs, hostnames, IP literals, and content IDs.
 - Gateway capability advertisements are authenticated claims (not automatic routes).
 - Local mesh continues without public connectivity.
-- Egress gateway is opt-in, policy-bound, and not an open proxy.
+- Egress **policy** is opt-in and denies private/reserved addresses by default.
+- TCP **relay/proxy is not implemented** in v0.1 (listener refuses to bind).
+- TCP/HTTPS success means reachability *probe*, not application delivery.
 
 See `docs/DESTINATION_ROUTING.md`. Diagnostics: `/comms/destinations/resolve`, `/comms/routes`, `/comms/gateways`, `/comms/network/status`.
