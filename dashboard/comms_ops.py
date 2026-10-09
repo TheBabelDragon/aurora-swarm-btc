@@ -270,4 +270,68 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         except Exception as e:
             return {"items": [], "error": str(e)}
 
-    logger.info("comms_ops mounted (chat+join_mesh+export)")
+    def _routing():
+        try:
+            from comms.routing.service import get_routing_service, init_routing_service
+            svc = get_routing_service()
+            if svc is None:
+                def _node_lookup(nid):
+                    try:
+                        nodes = get_comms().get_active_nodes() or []
+                        for n in nodes:
+                            if (n.get("node_id") or "") == nid:
+                                return n
+                    except Exception:
+                        pass
+                    return None
+                svc = init_routing_service(node_lookup=_node_lookup)
+            return svc
+        except Exception as e:
+            logger.debug("routing service unavailable: %s", e)
+            return None
+
+    @app.get("/comms/destinations/resolve")
+    def comms_destinations_resolve(target: str = Query("", max_length=512)):
+        target = (target or "").strip()
+        if not target:
+            return JSONResponse({"ok": False, "error": "target required"}, status_code=400)
+        svc = _routing()
+        if svc is None:
+            return {"ok": False, "error": "routing_unavailable", "resolved": False}
+        try:
+            return svc.diagnostics.resolve_target(target)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+    @app.get("/comms/routes")
+    def comms_routes(target: Optional[str] = Query(None, max_length=512)):
+        svc = _routing()
+        if svc is None:
+            return {"ok": False, "error": "routing_unavailable", "routes": []}
+        try:
+            t = (target or "").strip() or None
+            return svc.diagnostics.list_routes(t)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+    @app.get("/comms/gateways")
+    def comms_gateways():
+        svc = _routing()
+        if svc is None:
+            return {"ok": False, "error": "routing_unavailable", "gateways": []}
+        try:
+            return svc.diagnostics.list_gateways()
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+    @app.get("/comms/network/status")
+    def comms_network_status():
+        svc = _routing()
+        if svc is None:
+            return {"ok": True, "routing_enabled": False, "note": "routing service not initialized"}
+        try:
+            return svc.diagnostics.network_status()
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+    logger.info("comms_ops mounted (chat+join_mesh+export+routing)")
