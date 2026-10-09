@@ -54,7 +54,7 @@ services:
       - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
       - INTENSITY=${INTENSITY:-22}
       - WORKER_NAME=${WORKER_NAME:-}
-      # Destination routing: on by default for mesh UI; egress still off
+      # Destination routing: on by default for mesh UI; egress relay still off
       - AURORA_DESTINATION_ROUTING_ENABLED=${AURORA_DESTINATION_ROUTING_ENABLED:-1}
       - AURORA_GATEWAY_ADVERTISE_ENABLED=${AURORA_GATEWAY_ADVERTISE_ENABLED:-0}
       - AURORA_EGRESS_GATEWAY_ENABLED=${AURORA_EGRESS_GATEWAY_ENABLED:-0}
