@@ -11,22 +11,14 @@ Optional **destination discovery & gateway routing** is on `main` under `comms/r
 - Resolves service / node / hostname / IP / content targets
 - Authenticated gateway capability *claims* (not automatic trust)
 - Policy-first routes with failover; connection-time `deny_private`
-- Mesh delivery path: `POST /comms/route_send` (node/service only)
-- Diagnostics: `/comms/destinations/resolve`, `/routes`, `/gateways`, `/network/status`
-- **Defaults off.** Egress relay is **not** implemented.
+- Mesh delivery path: dashboard **Destination Routing** panel + `POST /comms/route_send`
+- Diagnostics: resolve / routes / gateways / network status — all clickable in the UI
+- Solo compose turns routing **on** by default; **egress relay stays off**
 
-Enable on a live mesh:
+Open **http://127.0.0.1:8000** → **Destination Routing** panel.
 
-```bash
-export AURORA_DESTINATION_ROUTING_ENABLED=1
-./scripts/aurora-up.sh
-# then:
-curl -s 'http://127.0.0.1:8000/comms/network/status' | python -m json.tool
-curl -s 'http://127.0.0.1:8000/comms/destinations/resolve?target=dashboard' | python -m json.tool
-curl -s -X POST http://127.0.0.1:8000/comms/route_send \
-  -H 'Content-Type: application/json' \
-  -d '{"target":"dashboard","payload":{"text":"route ping"}}'
-```
+- **Resolve** / **Routes** / **Gateways** / **Network status** — click, no curl
+- **Send via mesh** — delivers to a node or service over the mesh bus
 
 See `docs/DESTINATION_ROUTING.md` and `MESH.md`.
 
@@ -96,7 +88,7 @@ docker compose -f docker-compose.solo.yml down
 | Piece | Role |
 |-------|------|
 | `comms/layer.py` | Mesh: register, heartbeat, targeted + broadcast messages |
-| `comms/routing/` | Optional destination discovery + gateway routing (off by default) |
+| `comms/routing/` | Destination discovery + gateway routing (mesh UI; egress off) |
 | `dashboard/` | Command UI + mining status truth + artifact clock panel |
 | `mods/mining_engine` | Stratum / CPU hashing path |
 | `mods/asset_fabric` | Durable asset object, possession, history, Bitcoin clock |
@@ -134,14 +126,5 @@ Experiments live in `mods/`. Core stays stable.
 ```bash
 python -m unittest discover -s tests -v
 
-python -m unittest \
-  tests.test_artifact_clock \
-  tests.test_asset_btc_anchor \
-  tests.test_temporal_possession \
-  tests.test_anchor_reorg \
-  tests.test_torrent_clock_metadata \
-  -v
-
-# Destination routing suite
-PYTHONPATH=. python -m pytest tests/test_destination_routing.py -q
+PYTHONPATH=. python -m pytest tests/test_destination_routing.py tests/test_routing_live_caller.py -q
 ```

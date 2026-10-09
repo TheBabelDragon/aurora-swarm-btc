@@ -70,11 +70,22 @@ def boot(
         return
 
     try:
-        from dashboard.html_fix import install_html_fix
-
-        install_html_fix(app)
+        from pathlib import Path as _P
+        from fastapi.staticfiles import StaticFiles
+        static_dir = _P(__file__).resolve().parent / "static"
+        if static_dir.is_dir() and not getattr(app.state, "aurora_static_mounted", False):
+            app.mount("/ux", StaticFiles(directory=str(static_dir / "ux")), name="ux")
+            app.state.aurora_static_mounted = True
+            logger.info("static /ux mounted from %s", static_dir / "ux")
     except Exception as e:
-        logger.warning(f"html_fix: {e}")
+        logger.warning(f"static ux: {e}")
+
+    try:
+        from dashboard.html_form import install_html_form
+
+        install_html_form(app)
+    except Exception as e:
+        logger.warning(f"html_form: {e}")
 
     try:
         from dashboard.identity_form import install_identity_routes
