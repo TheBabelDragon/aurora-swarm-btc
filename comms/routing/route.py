@@ -105,11 +105,9 @@ class RouteManager:
             if gw.is_expired:
                 continue
             rid = f"gw:{gw.gateway_id}:{destination.canonical_id}"
-            trust = gw.auth in ("secret",) and not gw.is_expired
-            authorized = trust and (
-                "mesh" in (gw.supported_transports or [])
-                or destination.kind in (DestinationKind.NODE, DestinationKind.SERVICE)
-            )
+            # Authenticated + fresh advertisement required for gateway routes
+            trust = (gw.auth == "secret") and (not gw.is_expired)
+            authorized = trust and bool(gw.supported_transports)
             rc = RouteCandidate(
                 route_id=rid, destination_key=key, next_hop_id=gw.gateway_id,
                 transport=gw.supported_transports[0] if gw.supported_transports else "mesh",
