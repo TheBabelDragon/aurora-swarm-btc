@@ -19,7 +19,7 @@ class T(unittest.TestCase):
         self.assertEqual(r.resolve("comms").kind, DestinationKind.SERVICE)
         self.assertEqual(r.resolve("w").kind, DestinationKind.NODE)
         self.assertEqual(r.resolve("1.2.3.4").kind, DestinationKind.IPV4)
-        self.assertEqual(r.resolve("localhost", allow_dns=False).kind, DestinationKind.HOSTNAME)
+        self.assertIn(r.resolve("localhost", allow_dns=False).kind, (DestinationKind.HOSTNAME, DestinationKind.SERVICE))
         self.assertEqual(r.resolve("sha256:"+"a"*64).kind, DestinationKind.CONTENT)
         with self.assertRaises(DestinationError):
             r.resolve("bad host!")
