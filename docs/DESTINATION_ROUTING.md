@@ -28,9 +28,32 @@ RouteManager         ->  candidates, policy, hysteresis, backoff
 ConnectionManager    ->  mesh + optional TCP/HTTPS *probe*
 EgressGateway        ->  policy authorization only (relay not implemented)
 NetworkDiagnostics   ->  read-only /comms/* surfaces
+DestinationRoutingService.mesh_send_to  ->  real mesh delivery (node/service)
 ```
 
 Does **not** replace Redis, UDP discovery (port 7379), or CommsLayer heartbeats.
+
+## Live exercise (solo mesh)
+
+```bash
+export AURORA_DESTINATION_ROUTING_ENABLED=1
+./scripts/aurora-up.sh
+
+# Status (routing_enabled should be true when env is set)
+curl -s http://127.0.0.1:8000/comms/network/status | python -m json.tool
+
+# Resolve a service id / local node
+curl -s 'http://127.0.0.1:8000/comms/destinations/resolve?target=dashboard' | python -m json.tool
+curl -s 'http://127.0.0.1:8000/comms/routes?target=dashboard' | python -m json.tool
+curl -s http://127.0.0.1:8000/comms/gateways | python -m json.tool
+
+# Real mesh send (node or service only — not hostname/IP egress)
+curl -s -X POST http://127.0.0.1:8000/comms/route_send \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"dashboard","payload":{"text":"route ping"}}' | python -m json.tool
+```
+
+Leave `AURORA_EGRESS_GATEWAY_ENABLED=0` unless you are only testing the policy gate (relay still refuses to bind).
 
 ## Verified in v0.1
 
@@ -43,6 +66,8 @@ Does **not** replace Redis, UDP discovery (port 7379), or CommsLayer heartbeats.
 | Route selection with cooldown / failover | Implemented + tested |
 | Connection-time policy (deny private/reserved, IPv4-mapped IPv6) | Implemented + tested |
 | Probe vs delivery separation (`result_kind`) | Implemented + tested |
+| Mesh delivery via `mesh_send_to` / `POST /comms/route_send` | Implemented |
+| Boot-time init with live `node_lookup` + `mesh_send` | Implemented |
 | Egress disabled by default; relay listener refused | Implemented + tested |
 | Dashboard endpoints `/comms/destinations/resolve`, `/routes`, `/gateways`, `/network/status` | Implemented |
 | Local mesh without public internet | Implemented + tested |
@@ -91,4 +116,9 @@ Read-only diagnostics (same exposure model as other `/comms/*` endpoints):
 - `GET /comms/gateways`
 - `GET /comms/network/status`
 
+Mesh delivery:
+
+- `POST /comms/route_send` — JSON `{ "target", "payload" }` or form `target` + `text`
+
 `reachable_hint` values describe *candidate availability*, not confirmed application delivery.
+`result_kind` on route_send is `mesh_ack` on success.

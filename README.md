@@ -4,6 +4,32 @@ Entropy-driven Bitcoin mining swarm with a Comms Layer mesh, sensing contract, a
 
 **They yearn for the mines.**
 
+## What's new (destination routing v0.1)
+
+Optional **destination discovery & gateway routing** is on `main` under `comms/routing/`.
+
+- Resolves service / node / hostname / IP / content targets
+- Authenticated gateway capability *claims* (not automatic trust)
+- Policy-first routes with failover; connection-time `deny_private`
+- Mesh delivery path: `POST /comms/route_send` (node/service only)
+- Diagnostics: `/comms/destinations/resolve`, `/routes`, `/gateways`, `/network/status`
+- **Defaults off.** Egress relay is **not** implemented.
+
+Enable on a live mesh:
+
+```bash
+export AURORA_DESTINATION_ROUTING_ENABLED=1
+./scripts/aurora-up.sh
+# then:
+curl -s 'http://127.0.0.1:8000/comms/network/status' | python -m json.tool
+curl -s 'http://127.0.0.1:8000/comms/destinations/resolve?target=dashboard' | python -m json.tool
+curl -s -X POST http://127.0.0.1:8000/comms/route_send \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"dashboard","payload":{"text":"route ping"}}'
+```
+
+See `docs/DESTINATION_ROUTING.md` and `MESH.md`.
+
 ## Layers
 
 ```
@@ -115,4 +141,7 @@ python -m unittest \
   tests.test_anchor_reorg \
   tests.test_torrent_clock_metadata \
   -v
+
+# Destination routing suite
+PYTHONPATH=. python -m pytest tests/test_destination_routing.py -q
 ```
