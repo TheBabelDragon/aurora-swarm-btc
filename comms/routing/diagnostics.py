@@ -1,9 +1,13 @@
-"""Read-only network diagnostics for dashboard/API."""
+"""Read-only network diagnostics for dashboard/API.
+
+Diagnostic states distinguish unresolved / resolved_no_route / mesh_reachable /
+probe_reachable / gateway_candidate — never claim application delivery.
+"""
 
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from .config import RoutingConfig
 from .connection import ConnectionManager
@@ -32,14 +36,14 @@ class NetworkDiagnostics:
         candidates = self.routes.discover_routes(dest)
         eligible = [c for c in candidates if c.eligible]
         selected = self.routes.select_route(dest, RoutePolicy())
-        reach = "unreachable"
+        reach = "resolved_no_route"
         if eligible:
             if any(c.transport == "mesh" for c in eligible):
                 reach = "mesh_reachable"
             elif any(c.next_hop_id == "local" for c in eligible):
-                reach = "locally_reachable"
+                reach = "probe_reachable"
             elif any(c.metadata.get("egress_enabled") for c in eligible):
-                reach = "gateway_reachable"
+                reach = "gateway_candidate"
             else:
                 reach = "route_candidates"
         return {
@@ -49,9 +53,10 @@ class NetworkDiagnostics:
             "selected_route": selected.to_dict() if selected else None,
             "selection_reason": (
                 "no_eligible_route" if selected is None
-                else f"policy_then_transport_freshness:{selected.transport}"
-            ),
-            "reachable_hint": reach, "ts": time.time(),
+                else f"policy_then_transport_freshness:{selected.transport}"),
+            "reachable_hint": reach,
+            "note": "reachable_hint is candidate availability, not confirmed delivery",
+            "ts": time.time(),
         }
 
     def list_routes(self, target: Optional[str] = None) -> Dict[str, Any]:
@@ -67,8 +72,13 @@ class NetworkDiagnostics:
 
     def list_gateways(self) -> Dict[str, Any]:
         gws = self.gateways.list_gateways()
-        return {"ok": True, "gateways": [g.to_dict() for g in gws],
-                "count": len(gws), "stats": self.gateways.stats()}
+        safe = []
+        for g in gws:
+            d = g.to_dict()
+            d["signature"] = (d.get("signature") or "")[:8] + "…" if d.get("signature") else ""
+            safe.append(d)
+        return {"ok": True, "gateways": safe, "count": len(safe),
+                "stats": self.gateways.stats()}
 
     def network_status(self) -> Dict[str, Any]:
         return {
