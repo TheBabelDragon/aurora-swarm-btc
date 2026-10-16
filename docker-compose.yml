@@ -4,8 +4,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: aurora-redis
-    ports:
-      - "6379:6379"
+    # Internal-only: no host port publish. Peers on aurora-net use redis:6379.
+    command: ["redis-server", "--bind", "0.0.0.0", "--protected-mode", "yes"]
     volumes:
       - redis_data:/data
     restart: unless-stopped
