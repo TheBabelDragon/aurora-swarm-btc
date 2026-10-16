@@ -10,15 +10,20 @@ from typing import Any, Callable, Optional
 from fastapi import Form, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from dashboard.comms_security import check_dashboard_auth, redact_redis as _redact_redis
+
 logger = logging.getLogger("aurora-dashboard.comms_ops")
 
 
-def _redact_redis(url: str) -> str:
-    if not url:
-        return ""
-    if "@" in url:
-        return url.split("@", 1)[0].split("://")[0] + "://***@" + url.split("@", 1)[1]
-    return url
+def _require_dashboard_auth(request: Request) -> Optional[JSONResponse]:
+    """If AURORA_DASHBOARD_API_KEY is set, require X-API-Key (or Bearer) match."""
+    ok, detail = check_dashboard_auth(request.headers)
+    if ok:
+        return None
+    return JSONResponse(
+        {"ok": False, "error": "unauthorized", "detail": detail or "valid X-API-Key required"},
+        status_code=401,
+    )
 
 
 def _fmt(hs: float) -> str:
@@ -81,7 +86,6 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             "status": "ok",
             "redis_ok": redis_ok,
             "redis_url": _redact_redis(getattr(comms, "redis_url", "") or ""),
-            "redis_url_raw": getattr(comms, "redis_url", "") or "",
             "node_id": comms.node_id,
             "peer_count": len(peers),
             "peers": peers,
@@ -94,8 +98,11 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
         }
 
     @app.post("/comms/join_mesh")
-    async def join_mesh(redis_url: str = Form("")):
+    async def join_mesh(request: Request, redis_url: str = Form("")):
         """Join shared LAN Redis — empty url = auto pick leader from discovery."""
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return denied
         try:
             from comms.mesh_join import try_join_mesh
 
@@ -110,24 +117,34 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.get("/comms/export")
-    def comms_export():
+    def comms_export(request: Request):
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return denied
         try:
             from comms.mesh_export import export_join_pack
             from comms.discovery import get_discovery
 
             comms = get_comms()
             d = get_discovery()
-            return export_join_pack(
+            pack = export_join_pack(
                 node_id=comms.node_id,
                 redis_url=getattr(comms, "redis_url", "") or os.getenv("REDIS_URL", ""),
                 peers=comms.get_active_nodes() or [],
                 discovered=d.snapshot_peers() if d else [],
             )
+            if isinstance(pack, dict) and "redis_url" in pack:
+                pack = dict(pack)
+                pack["redis_url"] = _redact_redis(str(pack.get("redis_url") or ""))
+            return pack
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.get("/comms/export.env", response_class=PlainTextResponse)
-    def comms_export_env():
+    def comms_export_env(request: Request):
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return PlainTextResponse("# unauthorized\n", status_code=401)
         try:
             from comms.mesh_export import export_join_pack
 
@@ -140,7 +157,10 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             return PlainTextResponse(f"# error: {e}\n", status_code=500)
 
     @app.get("/comms/export.sh", response_class=PlainTextResponse)
-    def comms_export_sh():
+    def comms_export_sh(request: Request):
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return PlainTextResponse("#!/bin/false\n# unauthorized\n", status_code=401)
         try:
             from comms.mesh_export import export_join_pack
 
@@ -171,7 +191,10 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             return {"enabled": False, "error": str(e), "peers": []}
 
     @app.post("/comms/register")
-    async def comms_register():
+    async def comms_register(request: Request):
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return denied
         try:
             comms = get_comms()
             comms.register_node(
@@ -185,7 +208,10 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.post("/comms/broadcast")
-    async def comms_broadcast(message: str = Form("ping from dashboard")):
+    async def comms_broadcast(request: Request, message: str = Form("ping from dashboard")):
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return denied
         try:
             from comms.layer import SwarmMessage
 
@@ -229,6 +255,9 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
 
     @app.post("/comms/chat/send")
     async def chat_send(request: Request):
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return denied
         try:
             text = ""
             to_n = None
@@ -253,7 +282,10 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     @app.post("/comms/chat/add_user")
-    async def chat_add_user(node_id: str = Form(...), display: str = Form("")):
+    async def chat_add_user(request: Request, node_id: str = Form(...), display: str = Form("")):
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return denied
         try:
             nid = (node_id or "").strip()
             if not nid:
@@ -359,6 +391,9 @@ def install_comms_ops(app: Any, *, get_comms: Callable[[], Any]):
     @app.post("/comms/route_send")
     async def comms_route_send(request: Request):
         """Resolve target and deliver over mesh (node/service only). No TCP egress."""
+        denied = _require_dashboard_auth(request)
+        if denied is not None:
+            return denied
         try:
             ctype = (request.headers.get("content-type") or "").lower()
             if "application/json" in ctype:
