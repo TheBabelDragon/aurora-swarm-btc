@@ -1,4 +1,5 @@
-# Host network — Redis + discovery + persistent node key
+# Host network — Redis bound to loopback only (single-host default).
+# Multi-node: see MESH.md / docker-compose.mesh.yml; require explicit secure Redis.
 services:
   redis:
     image: redis:7-alpine
@@ -8,9 +9,9 @@ services:
       [
         "redis-server",
         "--bind",
-        "0.0.0.0",
+        "127.0.0.1",
         "--protected-mode",
-        "no",
+        "yes",
         "--appendonly",
         "yes",
         "--save",
@@ -64,6 +65,8 @@ services:
       - AURORA_ROUTE_CONNECT_TIMEOUT=${AURORA_ROUTE_CONNECT_TIMEOUT:-5}
       - AURORA_ROUTE_MAX_RETRIES=${AURORA_ROUTE_MAX_RETRIES:-2}
       - AURORA_EGRESS_DENY_PRIVATE=${AURORA_EGRESS_DENY_PRIVATE:-1}
+      # Optional: protect mutation endpoints (join, route_send, export, chat send)
+      - AURORA_DASHBOARD_API_KEY=${AURORA_DASHBOARD_API_KEY:-}
     volumes:
       - node_key:/data
     restart: unless-stopped
