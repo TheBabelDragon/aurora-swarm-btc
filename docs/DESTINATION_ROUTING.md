@@ -88,14 +88,15 @@ Leave `AURORA_EGRESS_GATEWAY_ENABLED=0` unless you are only testing the policy g
 - EgressGateway does **not** bind a proxy socket in v0.1.
 - Does not modify host firewall or routing tables.
 - Diagnostics redact gateway signatures.
+- Optional `AURORA_DASHBOARD_API_KEY` gates mutation endpoints including `POST /comms/route_send` (see `MESH.md`).
 
 ## Configuration
 
-All defaults keep routing/egress **off**.
+Library defaults keep routing/egress **off**. Solo compose sets `AURORA_DESTINATION_ROUTING_ENABLED=1` for the UI; egress relay stays off.
 
 | Variable | Default | Meaning |
 |----------|---------|--------|
-| `AURORA_DESTINATION_ROUTING_ENABLED` | `0` | Master switch |
+| `AURORA_DESTINATION_ROUTING_ENABLED` | `0` | Master switch (solo compose enables) |
 | `AURORA_GATEWAY_ADVERTISE_ENABLED` | `0` | Emit gateway ads |
 | `AURORA_EGRESS_GATEWAY_ENABLED` | `0` | Policy gate (relay still not implemented) |
 | `AURORA_EGRESS_BIND_HOST` | `127.0.0.1` | Reserved for future relay |
@@ -121,4 +122,14 @@ Mesh delivery:
 - `POST /comms/route_send` — JSON `{ "target", "payload" }` or form `target` + `text`
 
 `reachable_hint` values describe *candidate availability*, not confirmed application delivery.
-`result_kind` on route_send is `mesh_ack` on success.
+
+`result_kind` on route_send (only claim what evidence exists):
+
+| Kind | Meaning |
+|------|--------|
+| `send_accepted` | Transport published the message (bare `True` from mesh_send) |
+| `recipient_acknowledged` | Transport provided recipient ack |
+| `application_delivered` | Application-level delivery confirmed |
+| `failed` / `unreachable` | Send failed or target could not be routed |
+
+A transport `True` is **never** treated as recipient acknowledgment.
