@@ -216,6 +216,16 @@ python -m pytest tests/test_destination_routing.py \
 
 See `INTEGRATION_CONTRACT.md`.
 
+## Docs map
+
+| Doc | Topic |
+|-----|--------|
+| `MESH.md` | Multi-node Redis mesh, discovery, Redis auth |
+| `docs/DESTINATION_ROUTING.md` | Destination resolve, routes, delivery semantics |
+| `docs/SHARED_EVIDENCE_CONTRACT.md` | Evidence integrity |
+| `docs/ARCHITECTURE.md` | Layer stack (content → fabric → torrent → BTC) |
+| `INTEGRATION_CONTRACT.md` | Sensing ↔ swarm ↔ MetaField |
+
 ## License
 
 See repository license file.
