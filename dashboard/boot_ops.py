@@ -26,7 +26,12 @@ def _init_destination_routing(get_comms: Callable[[], Any]) -> None:
             return None
 
         def _mesh_send(target_id: str, payload: Any) -> bool:
-            """Deliver via CommsLayer.send_to_node; returns True on publish."""
+            """Publish via CommsLayer.send_to_node.
+
+            Returns True only when the local transport accepted the message for
+            publish. This is *not* recipient acknowledgment or application
+            delivery; callers must treat True as send_accepted at most.
+            """
             try:
                 from comms.layer import SwarmMessage
 
