@@ -64,9 +64,8 @@ class DestinationRoutingService:
         if not self.config.enabled:
             logger.info("destination routing disabled (AURORA_DESTINATION_ROUTING_ENABLED)")
             return
-        # Relay/proxy is not implemented in v0.1; start_listener always refuses.
         if self.config.egress_gateway_enabled:
-            self.egress.start_listener()  # logs relay_not_implemented
+            self.egress.start_listener()
         logger.info("destination routing enabled (egress relay not implemented)")
 
     def stop(self):
@@ -80,22 +79,38 @@ class DestinationRoutingService:
         """Resolve *target*, require a mesh route, deliver via mesh_send.
 
         Mesh-only application path. Does not open TCP/HTTPS or egress.
-        Returns a structured result suitable for dashboard/API callers.
+
+        Outcome fields (only claimed when evidence exists):
+          send_attempted       — transport call was invoked
+          send_accepted        — transport accepted the message for publish
+          recipient_acknowledged — transport provided recipient ack (rare)
+          application_delivered — application-level delivery confirmed (rare)
+          result_kind          — send_accepted | recipient_acknowledged |
+                                 application_delivered | unreachable | failed
+
+        A bare True return from mesh_send is treated as send_accepted only
+        (publish succeeded), never as recipient acknowledgment.
         """
         dest, err = self.resolver.try_resolve(target)
         if err or dest is None:
             return {"ok": False, "error": err or "unresolved", "target": target,
-                    "result_kind": "unreachable"}
+                    "result_kind": "unreachable",
+                    "send_attempted": False, "send_accepted": False,
+                    "recipient_acknowledged": False, "application_delivered": False}
         if dest.kind not in (DestinationKind.NODE, DestinationKind.SERVICE):
             return {
                 "ok": False, "error": "mesh_send_requires_node_or_service",
                 "target": target, "kind": dest.kind.value,
                 "result_kind": "unreachable",
+                "send_attempted": False, "send_accepted": False,
+                "recipient_acknowledged": False, "application_delivered": False,
                 "note": "Use resolve/probe for hostname/IP; mesh delivery is node/service only",
             }
         if self._mesh_send is None:
             return {"ok": False, "error": "mesh_transport_unavailable", "target": target,
-                    "result_kind": "unreachable"}
+                    "result_kind": "unreachable",
+                    "send_attempted": False, "send_accepted": False,
+                    "recipient_acknowledged": False, "application_delivered": False}
         policy = RoutePolicy(allow_egress=False, prefer_transports=["mesh"])
         route = self.routes.select_route(dest, policy)
         if route is None or route.transport != "mesh":
@@ -103,25 +118,64 @@ class DestinationRoutingService:
                 "ok": False, "error": "no_mesh_route",
                 "target": target, "destination": dest.to_dict(),
                 "result_kind": "unreachable",
+                "send_attempted": False, "send_accepted": False,
+                "recipient_acknowledged": False, "application_delivered": False,
             }
         body = payload if payload is not None else {"type": "route_send"}
         try:
-            ok = bool(self._mesh_send(dest.canonical_id, body))
+            raw = self._mesh_send(dest.canonical_id, body)
         except Exception as e:
             self.routes.report_route_failure(route.route_id, str(e)[:80])
-            return {"ok": False, "error": str(e)[:200], "target": target,
-                    "route_id": route.route_id, "result_kind": "unreachable"}
-        if ok:
-            self.routes.report_route_success(route.route_id)
             return {
-                "ok": True, "target": target, "node_id": dest.canonical_id,
-                "route_id": route.route_id, "transport": "mesh",
-                "result_kind": "mesh_ack",
-                "destination": dest.to_dict(),
+                "ok": False, "error": str(e)[:200], "target": target,
+                "route_id": route.route_id, "result_kind": "failed",
+                "send_attempted": True, "send_accepted": False,
+                "recipient_acknowledged": False, "application_delivered": False,
             }
-        self.routes.report_route_failure(route.route_id, "mesh_send_failed")
-        return {"ok": False, "error": "mesh_send_failed", "target": target,
-                "route_id": route.route_id, "result_kind": "unreachable"}
+
+        send_accepted = False
+        recipient_ack = False
+        app_delivered = False
+        if isinstance(raw, dict):
+            send_accepted = bool(raw.get("send_accepted", raw.get("ok", False)))
+            recipient_ack = bool(raw.get("recipient_acknowledged", False))
+            app_delivered = bool(raw.get("application_delivered", False))
+        else:
+            send_accepted = bool(raw)
+
+        if not send_accepted and not recipient_ack and not app_delivered:
+            self.routes.report_route_failure(route.route_id, "mesh_send_failed")
+            return {
+                "ok": False, "error": "mesh_send_failed", "target": target,
+                "route_id": route.route_id, "result_kind": "failed",
+                "send_attempted": True, "send_accepted": False,
+                "recipient_acknowledged": False, "application_delivered": False,
+            }
+
+        self.routes.report_route_success(route.route_id)
+        if app_delivered:
+            kind = "application_delivered"
+        elif recipient_ack:
+            kind = "recipient_acknowledged"
+        else:
+            kind = "send_accepted"
+        return {
+            "ok": True,
+            "target": target,
+            "node_id": dest.canonical_id,
+            "route_id": route.route_id,
+            "transport": "mesh",
+            "result_kind": kind,
+            "send_attempted": True,
+            "send_accepted": send_accepted or recipient_ack or app_delivered,
+            "recipient_acknowledged": recipient_ack,
+            "application_delivered": app_delivered,
+            "destination": dest.to_dict(),
+            "note": (
+                "send_accepted means transport published; not recipient ack"
+                if kind == "send_accepted" else None
+            ),
+        }
 
     def resolve_and_probe(self, target: str) -> Dict[str, Any]:
         """Resolve + connection probe (mesh ack or TCP/HTTPS handshake). Not delivery."""
