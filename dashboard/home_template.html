@@ -237,26 +237,93 @@ async function nccLoad(){
 }
 async function nccCmd(action){
   var id=document.getElementById('ncc_node').value;
-  if(!id){document.getElementById('ncc_result').textContent='Select a node first';document.getElementById('ncc_result').className='error';return;}
-  var fd=new FormData();fd.append('action',action);
-  if(action==='intensity'){fd.append('intensity',document.getElementById('ncc_intensity').value||'19');}
-  if(action==='chat'){fd.append('message',document.getElementById('ncc_msg').value||'ping');}
-  var d=await fetch('/comms/node/'+encodeURIComponent(id)+'/command',{method:'POST',body:fd}).then(function(r){return r.json();});
   var o=document.getElementById('ncc_result');
-  o.textContent=d.ok?(action+' → '+id+(d.balance!=null?(' bal='+d.balance):'')):(d.error||'failed');
-  o.className=d.ok?'success':'error';
-  if(action==='bvl_balance')nccLoad();
+  if(!id){o.textContent='Select a node first';o.className='error';return;}
+  o.textContent='sending…';o.className='muted';
+  try{
+    var fd=new FormData();fd.append('action',action);
+    if(action==='intensity'){fd.append('intensity',document.getElementById('ncc_intensity').value||'19');}
+    if(action==='chat'){fd.append('message',document.getElementById('ncc_msg').value||'ping');}
+    var r=await fetch('/comms/node/'+encodeURIComponent(id)+'/command',{method:'POST',body:fd});
+    var d=await r.json().catch(function(){return {ok:false,error:'non-JSON '+r.status};});
+    if(!r.ok&&d.ok!==true)d={ok:false,error:(d&&d.error)||('HTTP '+r.status)};
+    if(d.ok){
+      var extra='';
+      if(d.balance!=null)extra=' bal='+d.balance;
+      else if(d.result&&d.result.ok===false)extra=' · chat:'+(d.result.error||'fail');
+      else if(d.payload)extra=' · queued';
+      o.textContent=action+' → '+id+extra;
+      o.className='success';
+    }else{
+      o.textContent=d.error||d.detail||'failed';
+      o.className='error';
+    }
+    if(action==='bvl_balance')nccLoad();
+  }catch(e){o.textContent=String(e);o.className='error';}
 }
 
-async function uploadTorrent(){var f=document.getElementById('torrent_file').files[0];if(!f)return;var fd=new FormData();fd.append('file',f);
-var data=await fetch('/torrent/upload',{method:'POST',body:fd}).then(function(r){return r.json();});showT(data.status==='ok'?'Seeded':'fail',data.status==='ok');}
-async function ensureAsset(){var ih=document.getElementById('ensure_infohash').value.trim();var fd=new FormData();fd.append('infohash',ih);await fetch('/torrent/ensure',{method:'POST',body:fd});}
-async function processBroadcasts(){await fetch('/torrent/process_broadcasts',{method:'POST'});}
-async function registerIdentity(){var d=await fetch('/btc/identity/register',{method:'POST'}).then(function(r){return r.json();});showT(d.status==='ok'?'Identity registered':'identity fail',d.status==='ok');refresh();}
-async function sendBroadcast(action,factor){var fd=new FormData();fd.append('action',action);fd.append('reason','dash');if(factor!=null)fd.append('factor',factor);
-var data=await fetch('/command/broadcast',{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.action;}
-async function sendToNode(action){var id=document.getElementById('target_node').value.trim();if(!id)return;var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
-var data=await fetch('/command/to_node/'+id,{method:'POST',body:fd}).then(function(r){return r.json();});document.getElementById('command_result').innerText='OK '+data.target;}
+async function uploadTorrent(){
+  var f=document.getElementById('torrent_file').files[0];if(!f){showT('choose a file first',false);return;}
+  try{
+    var fd=new FormData();fd.append('file',f);
+    var r=await fetch('/torrent/upload',{method:'POST',body:fd});
+    var data=await r.json().catch(function(){return {};});
+    if(r.status===404){showT('upload not mounted (no /torrent/upload)',false);return;}
+    showT((data.status==='ok'||data.ok)?'Seeded':(data.error||data.detail||'fail'),!!(data.status==='ok'||data.ok));
+  }catch(e){showT(String(e),false);}
+}
+async function ensureAsset(){
+  var ih=document.getElementById('ensure_infohash').value.trim();
+  if(!ih){showT('infohash required',false);return;}
+  try{
+    var fd=new FormData();fd.append('infohash',ih);
+    var r=await fetch('/torrent/ensure',{method:'POST',body:fd});
+    var data=await r.json().catch(function(){return {};});
+    if(r.status===404){showT('ensure not mounted (no /torrent/ensure)',false);return;}
+    showT((data.status==='ok'||data.ok)?'Ensure queued':(data.error||data.detail||'fail'),!!(data.status==='ok'||data.ok));
+  }catch(e){showT(String(e),false);}
+}
+async function processBroadcasts(){try{var r=await fetch('/torrent/process_broadcasts_batched',{method:'POST'});var d=await r.json().catch(function(){return {};});showT(r.ok&&(d.status==='ok'||d.ok)?'Broadcasts processed':(d.error||d.detail||('HTTP '+r.status)),r.ok&&(d.status==='ok'||d.ok));}catch(e){showT(String(e),false);}}
+async function registerIdentity(){try{var r=await fetch('/btc/identity/register',{method:'POST'});var d=await r.json().catch(function(){return {};});showT(d.status==='ok'?'Identity registered':(d.detail||d.error||'identity fail'),d.status==='ok');}catch(e){showT(String(e),false);}refresh();}
+function showCmdResult(data, fallbackOk){
+  var el=document.getElementById('command_result');
+  if(!el)return;
+  var ok=(data&&(data.status==='sent'||data.ok===true));
+  if(!ok&&data&&data.status==='error')ok=false;
+  var msg;
+  if(ok){
+    msg='sent · '+(data.action||fallbackOk||'')+(data.target?(' → '+data.target):'');
+  }else{
+    msg=(data&&(data.error||data.detail||data.status))||'command failed';
+  }
+  el.textContent=msg;
+  el.className=ok?'success':'error';
+}
+async function sendBroadcast(action,factor){
+  var el=document.getElementById('command_result');
+  if(el){el.textContent='sending…';el.className='muted';}
+  try{
+    var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
+    if(factor!=null)fd.append('factor',factor);
+    var r=await fetch('/command/broadcast',{method:'POST',body:fd});
+    var data=await r.json().catch(function(){return {status:'error',error:'non-JSON '+r.status};});
+    if(!r.ok)data={status:'error',error:(data&&data.error)||('HTTP '+r.status)};
+    showCmdResult(data, action);
+  }catch(e){showCmdResult({status:'error',error:String(e)}); }
+}
+async function sendToNode(action){
+  var id=document.getElementById('target_node').value.trim();
+  if(!id){showCmdResult({status:'error',error:'enter target node id'});return;}
+  var el=document.getElementById('command_result');
+  if(el){el.textContent='sending…';el.className='muted';}
+  try{
+    var fd=new FormData();fd.append('action',action);fd.append('reason','dash');
+    var r=await fetch('/command/to_node/'+encodeURIComponent(id),{method:'POST',body:fd});
+    var data=await r.json().catch(function(){return {status:'error',error:'non-JSON '+r.status};});
+    if(!r.ok)data={status:'error',error:(data&&data.error)||('HTTP '+r.status)};
+    showCmdResult(data, action);
+  }catch(e){showCmdResult({status:'error',error:String(e)}); }
+}
 
 async function routeResolve(){
   var t=(document.getElementById('route_target').value||'').trim();
