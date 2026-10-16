@@ -32,6 +32,11 @@ def mount_btc_ops(
             logger.exception("batch process failed")
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
+    @app.post("/torrent/process_broadcasts")
+    async def process_broadcasts_alias():
+        """UI alias for process_broadcasts_batched."""
+        return await process_broadcasts_batched()
+
     @app.get("/btc/status")
     def btc_status():
         anc = get_anchor()
