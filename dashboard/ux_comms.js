@@ -9,7 +9,7 @@
   }
   function esc(s) {
     return String(s || "").replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+      return { "&": "&", "<": "<", ">": ">", '"': """, "'": "&#39;" }[c];
     });
   }
   async function fetchT(url, opts, ms) {
@@ -54,7 +54,7 @@
       box.className = "muted";
       box.innerHTML =
         "<strong>Other machine seen on LAN.</strong> Connecting to shared mesh… " +
-        "If this stays stuck &gt;30s, click <em>Connect shared window</em>.";
+        "If this stays stuck >30s, click <em>Connect shared window</em>.";
       if (!joinAttempted) {
         joinAttempted = true;
         connectSharedWindow();
@@ -283,8 +283,18 @@
     try {
       var d = await jget("/comms/export", 8000);
       var x = el("comms_export");
+      var o = el("comms_result");
+      if (d && (d.error === "unauthorized" || d.ok === false)) {
+        if (x) x.textContent = "";
+        if (o) { o.textContent = d.detail || d.error || "unauthorized"; o.className = "error"; }
+        return;
+      }
       if (x) x.textContent = d.env_export || JSON.stringify(d, null, 2);
-    } catch (e) {}
+      if (o) { o.textContent = "export ready"; o.className = "success"; }
+    } catch (e) {
+      var o = el("comms_result");
+      if (o) { o.textContent = String(e); o.className = "error"; }
+    }
   };
   window.joinSharedMesh = connectSharedWindow;
 
