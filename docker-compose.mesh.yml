@@ -1,20 +1,40 @@
-# Multi-machine mesh: BOTH must share REDIS_URL
-# Hub: docker compose -f docker-compose.mesh.yml --profile hub up -d --build
-# Peer: REDIS_URL=redis://HUB_IP:6379/0 docker compose -f docker-compose.mesh.yml up -d --build
+# Multi-machine mesh: BOTH must share REDIS_URL with authentication.
+#
+# SECURITY: Redis must NOT run without a password on an untrusted network.
+# Set REDIS_PASSWORD to a strong secret on every node before starting.
+#
+# Hub:
+#   export REDIS_PASSWORD='long-random-secret'
+#   docker compose -f docker-compose.mesh.yml --profile hub up -d --build
+#
+# Peer:
+#   export REDIS_PASSWORD='long-random-secret'
+#   export REDIS_URL="redis://:${REDIS_PASSWORD}@HUB_IP:6379/0"
+#   docker compose -f docker-compose.mesh.yml up -d --build
 
 services:
   redis:
     image: redis:7-alpine
     container_name: aurora-redis
     profiles: ["hub"]
-    command: ["redis-server", "--bind", "0.0.0.0", "--protected-mode", "no"]
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$REDIS_PASSWORD" ]; then
+          echo "FATAL: REDIS_PASSWORD must be set for multi-node mesh Redis" >&2
+          exit 1
+        fi
+        exec redis-server --bind 0.0.0.0 --protected-mode yes --requirepass "$$REDIS_PASSWORD"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required for mesh hub Redis}
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -37,6 +57,7 @@ services:
       - MINING_WALLET=${MINING_WALLET:-bc1qdpqzuem4dkamt8ckcwaul7a2rhqju30xwn3f5g}
       - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
       - INTENSITY=${INTENSITY:-22}
+      - AURORA_DASHBOARD_API_KEY=${AURORA_DASHBOARD_API_KEY:-}
     restart: unless-stopped
 
 volumes:

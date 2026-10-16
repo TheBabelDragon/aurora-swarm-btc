@@ -1,4 +1,5 @@
-# Host network — Redis + discovery + persistent node key
+# Host network — Redis bound to loopback only (single-host default).
+# Multi-node: see MESH.md / docker-compose.mesh.yml; require explicit secure Redis.
 services:
   redis:
     image: redis:7-alpine
@@ -8,9 +9,9 @@ services:
       [
         "redis-server",
         "--bind",
-        "0.0.0.0",
+        "127.0.0.1",
         "--protected-mode",
-        "no",
+        "yes",
         "--appendonly",
         "yes",
         "--save",
@@ -54,7 +55,6 @@ services:
       - POOL_URL=${POOL_URL:-stratum+tcp://stratum.braiins.com:3333}
       - INTENSITY=${INTENSITY:-22}
       - WORKER_NAME=${WORKER_NAME:-}
-      # Destination routing: on by default for mesh UI; egress relay still off
       - AURORA_DESTINATION_ROUTING_ENABLED=${AURORA_DESTINATION_ROUTING_ENABLED:-1}
       - AURORA_GATEWAY_ADVERTISE_ENABLED=${AURORA_GATEWAY_ADVERTISE_ENABLED:-0}
       - AURORA_EGRESS_GATEWAY_ENABLED=${AURORA_EGRESS_GATEWAY_ENABLED:-0}
@@ -64,6 +64,7 @@ services:
       - AURORA_ROUTE_CONNECT_TIMEOUT=${AURORA_ROUTE_CONNECT_TIMEOUT:-5}
       - AURORA_ROUTE_MAX_RETRIES=${AURORA_ROUTE_MAX_RETRIES:-2}
       - AURORA_EGRESS_DENY_PRIVATE=${AURORA_EGRESS_DENY_PRIVATE:-1}
+      - AURORA_DASHBOARD_API_KEY=${AURORA_DASHBOARD_API_KEY:-}
     volumes:
       - node_key:/data
     restart: unless-stopped
