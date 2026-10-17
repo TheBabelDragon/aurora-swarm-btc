@@ -120,6 +120,13 @@ def boot(
         logger.warning(f"comms_ops: {e}")
 
     try:
+        from dashboard.ghostwalk_ops import install_ghostwalk_ops
+
+        install_ghostwalk_ops(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"ghostwalk_ops: {e}")
+
+    try:
         from dashboard.node_ops import install_node_ops
 
         install_node_ops(app, get_comms=get_comms, get_identity=get_identity)
@@ -214,4 +221,4 @@ def boot(
     _init_destination_routing(get_comms)
 
     app.state.aurora_booted = True
-    logger.info("boot complete (mining_standalone + mine_governor + routing)")
+    logger.info("boot complete (mining_standalone + mine_governor + routing + ghostwalk)")
