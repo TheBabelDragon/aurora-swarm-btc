@@ -133,3 +133,60 @@ Mesh delivery:
 | `failed` / `unreachable` | Send failed or target could not be routed |
 
 A transport `True` is **never** treated as recipient acknowledgment.
+
+## Autonomic Fabric Phase 1
+
+Extends the v0.1 foundation with observable, recoverable mesh delivery. Does not
+replace RouteManager, Redis mesh, or UDP discovery.
+
+### Delivery state machine
+
+| State | Meaning |
+|-------|--------|
+| `ACCEPTED` | Local transport accepted the message for publish (not end-to-end) |
+| `FORWARDED` | Hop-level acknowledgment received |
+| `DELIVERED` | Destination-level authenticated acknowledgment received |
+| `FAILED` | Retries exhausted, hop limit, expiry, or permanent error |
+| `UNKNOWN` | In-flight / no conclusive outcome yet |
+
+**Never** report `DELIVERED` solely because a local queue accepted or a relay
+forwarded. Hop ACKs ≠ destination ACKs.
+
+### Message envelope
+
+Every `mesh_send_to` attaches an envelope (`message_id`, `nonce`, expiry,
+`hop_limit`, optional HMAC signature via `AURORA_MESH_SECRET`). Bounded
+deduplication rejects replays. Diagnostics and delivery logs never include
+payloads, secrets, or credentials.
+
+### Peer health and recovery
+
+- Tracks last success/failure, consecutive failures, latency, temporary loss
+  vs confirmed unreachable.
+- On failure: report route failure (existing cooldown/backoff), try eligible
+  alternate routes up to `AURORA_ROUTE_MAX_RETRIES`.
+- Hysteresis on route selection is unchanged (RouteManager).
+- Unauthenticated gateway advertisements cannot manipulate route scores.
+
+### Acknowledgments
+
+- `Acknowledgment` objects carry `ack_kind` (`hop` | `destination`) and are
+  HMAC-signed when `AURORA_MESH_SECRET` is set.
+- Invalid signatures are rejected (`ingest_acknowledgment`).
+- Transport dict responses may include `ack`, `hop_acknowledged`,
+  `recipient_acknowledged`, `application_delivered`.
+
+### Tests
+
+```bash
+python -m pytest tests/test_autonomic_fabric_phase1.py tests/test_destination_routing.py tests/test_routing_security_hardening.py -q
+```
+
+Includes simulated two-node failure/recovery and three-node peer health.
+These are **simulated** (ControllableTransport), not real-device validation.
+
+### Security boundaries (Phase 1)
+
+- Public egress and TCP relay remain disabled by default / not implemented.
+- Local mesh works with no ISP and no public gateway.
+- Diagnostics redact signatures and never log message contents.
