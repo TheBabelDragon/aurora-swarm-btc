@@ -68,6 +68,7 @@ Optional edits in `.env`:
 | `AURORA_NODE_ID` | Stable name for this machine (default: hostname-based) |
 | `AURORA_DASHBOARD_API_KEY` | If set, mutation APIs require `X-API-Key` |
 | `AURORA_MESH_SECRET` | Shared HMAC secret for LAN discovery auth |
+| `AEGIS_ENABLED` | AEGIS-42 security oversight (default `1`; set `0` to disable) |
 
 Solo Redis binds **127.0.0.1 only** (no unauthenticated exposure on the LAN).
 
@@ -102,6 +103,7 @@ xdg-open http://127.0.0.1:8000
 ```bash
 curl -s http://127.0.0.1:8000/comms/status | python -m json.tool
 curl -s http://127.0.0.1:8000/comms/network/status | python -m json.tool
+curl -s http://127.0.0.1:8000/aegis/status | python -m json.tool
 docker compose -f docker-compose.solo.yml logs --tail=50 dashboard
 ```
 
@@ -165,6 +167,25 @@ See `docs/DESTINATION_ROUTING.md`.
 
 ---
 
+## AEGIS-42 security oversight
+
+First-class, local-first security oversight integrated into the Aurora node lifecycle (`mods/aegis_42`). Starts automatically on boot; disable with `AEGIS_ENABLED=0`.
+
+- **Deterministic policy** — works with every AI model disabled; models are advisory only
+- Monitors worker lifecycle, tool invocation, capability changes, auth failures, routing/egress decisions, replay, and bypass attempts
+- Hash-chained audit log with integrity verification
+- Narrow containment only (revoke capability/identity, pause/quarantine, rate-limit) — no remote shell or host-wide kill
+- API: `/aegis/status`, `/aegis/events`, `/aegis/audit`, `/aegis/identities`, `/aegis/containment`
+
+```bash
+curl -s http://127.0.0.1:8000/aegis/status | python -m json.tool
+python -m pytest tests/test_aegis_42.py -q
+```
+
+Full design, threat model, and non-goals: **`docs/AEGIS_42.md`**.
+
+---
+
 ## Architecture
 
 | Piece | Role |
@@ -172,6 +193,7 @@ See `docs/DESTINATION_ROUTING.md`.
 | `comms/layer.py` | Mesh: register, heartbeat, targeted + broadcast |
 | `comms/routing/` | Destination discovery + gateway routing |
 | `dashboard/` | UI + mining status + routing panel |
+| `mods/aegis_42` | Security oversight: policy, identity, audit, containment |
 | `mods/mining_engine` | Stratum / CPU hashing |
 | `mods/asset_fabric` | Asset object, possession, history, Bitcoin clock |
 | `mods/btc_anchor` | Commitment, inclusion, reorg |
@@ -192,6 +214,7 @@ Shared truth lives on **one Redis**. LAN discovery uses UDP **7379**.
 - `/comms/status` never returns credential-bearing Redis URLs
 - Optional `AURORA_DASHBOARD_API_KEY` protects mutation endpoints
 - Public TCP relay remains disabled
+- AEGIS-42 enabled by default; model-independent baseline policy on node boot
 
 ---
 
@@ -203,7 +226,8 @@ sudo pacman -S --needed python-pytest
 python -m pytest tests/test_destination_routing.py \
   tests/test_routing_live_caller.py \
   tests/test_routing_security_hardening.py \
-  tests/test_evidence_integrity.py -q
+  tests/test_evidence_integrity.py \
+  tests/test_aegis_42.py -q
 ```
 
 ---
@@ -223,6 +247,7 @@ See `INTEGRATION_CONTRACT.md`.
 | `MESH.md` | Multi-node Redis mesh, discovery, Redis auth |
 | `docs/DESTINATION_ROUTING.md` | Destination resolve, routes, delivery semantics |
 | `docs/SHARED_EVIDENCE_CONTRACT.md` | Evidence integrity |
+| `docs/AEGIS_42.md` | Security oversight architecture and threat model |
 | `docs/ARCHITECTURE.md` | Layer stack (content → fabric → torrent → BTC) |
 | `INTEGRATION_CONTRACT.md` | Sensing ↔ swarm ↔ MetaField |
 
