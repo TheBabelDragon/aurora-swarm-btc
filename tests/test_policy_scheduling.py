@@ -47,9 +47,11 @@ def test_save_draft_immutable_versions(svc):
     assert sim.side_effect_free is True
     v = svc.validate_draft()
     assert v.validation_ok is not None
-    # put_version rejects overwrite
+    svc.request_activation(actor="operator", approved=True)
+    active = svc.store.get_version(svc.store.active_version_id())
+    assert active is not None
     with pytest.raises(ValueError):
-        svc.store.put_version(d1)
+        svc.store.put_version(active.model_copy(update={"notes": "tamper"}))
 
 
 def test_simulation_no_dispatch(svc):
@@ -75,10 +77,8 @@ def test_activation_concurrency_conflict(svc):
     svc.save_draft()
     svc.simulate(workers=[])
     svc.validate_draft()
-    # First activation
     r1 = svc.request_activation(actor="operator", approved=True)
     assert r1["ok"]
-    # Second draft activate with stale expected
     svc.update_preview({"latency_preference": 11})
     svc.save_draft()
     svc.simulate(workers=[])
@@ -94,7 +94,6 @@ def test_rollback_creates_new_version(svc):
     svc.validate_draft()
     svc.request_activation(actor="operator", approved=True)
     active = svc.store.active_version_id()
-    # Second policy
     svc.update_preview({"latency_preference": 5})
     svc.save_draft()
     svc.simulate(workers=[])
@@ -105,7 +104,7 @@ def test_rollback_creates_new_version(svc):
     rb = svc.rollback(active, actor="operator", reason="test rollback")
     assert rb["ok"] is True
     assert rb["source_version_id"] == active
-    assert rb["active_version_id"] != active  # new version id based on historical prefs
+    assert rb["active_version_id"] != active
     versions = svc.list_versions()
     assert len(versions) >= 3
 
