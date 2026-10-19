@@ -4,10 +4,29 @@ from __future__ import annotations
 
 import pytest
 
-from mods.policy_scheduling.schema import INITIAL_DRAFT, ActivationMode, PolicyStatus
+from mods.policy_scheduling.schema import INITIAL_DRAFT, PolicyStatus
 from mods.policy_scheduling.service import PolicyService
-from mods.policy_scheduling.store import ConcurrentModificationError
-from mods.policy_scheduling.multiflow_adapter import MultiFlowAdapter, MultiFlowAvailability
+from mods.policy_scheduling.store import PolicyStore
+from mods.policy_scheduling.multiflow_adapter import MultiFlowAvailability
+
+
+class FakeComms:
+    """In-memory CommsLayer stand-in for durable store tests."""
+
+    def __init__(self) -> None:
+        self._state = {}
+
+    def set_state(self, key, value, expire=0):
+        self._state[key] = value
+
+    def get_state(self, key, default=None):
+        return self._state.get(key, default)
+
+    def get_workers(self):
+        return []
+
+    def get_active_nodes(self):
+        return []
 
 
 @pytest.fixture
@@ -135,3 +154,25 @@ def test_multiflow_disabled_by_default(svc):
 def test_unknown_security_fields_rejected(svc):
     with pytest.raises(ValueError):
         svc.update_preview({"activation_mode": "shadow", "grant_root": True})
+
+
+def test_durable_store_roundtrip():
+    """Active policy + audit survive store re-attach (simulated restart)."""
+    comms = FakeComms()
+    svc = PolicyService()
+    svc.attach_comms(comms)
+    svc.save_draft()
+    svc.simulate(workers=[{"node_id": "w1", "capabilities": [], "metadata": {}}])
+    svc.validate_draft()
+    act = svc.request_activation(actor="operator", approved=True)
+    assert act["ok"]
+    active_id = svc.store.active_version_id()
+    assert active_id
+    assert svc.get_status()["durable_store"] is True
+
+    # Simulate process restart: new store loads from same Redis/comms
+    store2 = PolicyStore()
+    store2.attach_comms(comms)
+    assert store2.active_version_id() == active_id
+    assert store2.get_version(active_id) is not None
+    assert len(store2.list_audit()) >= 1
