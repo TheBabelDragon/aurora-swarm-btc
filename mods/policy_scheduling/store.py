@@ -1,20 +1,26 @@
 """Immutable policy version store.
 
 In-process primary store; optional Redis mirror via CommsLayer when attached.
-Versions are never mutated after leave-draft. Active reference is atomic.
+Active versions are never rewritten; pre-active workflow may progress status
+once per version_id (draft→simulated→validated→pending).
 """
 
 from __future__ import annotations
 
-import copy
 import threading
-import time
 from typing import Any, Dict, List, Optional
 
 from .schema import AuditEntry, PolicyDocument, PolicyStatus, SimulationResult
 
-# Working-copy statuses allowed in the draft slot (not yet active)
 _WORKING = {
+    PolicyStatus.DRAFT,
+    PolicyStatus.SIMULATED,
+    PolicyStatus.VALIDATED,
+    PolicyStatus.PENDING_APPROVAL,
+    PolicyStatus.REJECTED,
+}
+
+_PRE_ACTIVE = {
     PolicyStatus.DRAFT,
     PolicyStatus.SIMULATED,
     PolicyStatus.VALIDATED,
@@ -63,10 +69,15 @@ class PolicyStore:
             self._mirror("draft", None)
 
     def put_version(self, doc: PolicyDocument) -> PolicyDocument:
-        """Store an immutable version. Rejects overwrite of existing version_id."""
+        """Insert or progress a pre-active version. Active/superseded records are frozen."""
         with self._lock:
-            if doc.version_id in self._versions:
-                raise ValueError(f"Version {doc.version_id} is immutable")
+            existing = self._versions.get(doc.version_id)
+            if existing is not None:
+                if existing.status in (PolicyStatus.ACTIVE, PolicyStatus.SUPERSEDED):
+                    raise ValueError(f"Version {doc.version_id} is immutable")
+                if existing.status not in _PRE_ACTIVE:
+                    raise ValueError(f"Version {doc.version_id} is immutable")
+                # allow status progression on the same id before activation
             stored = doc.model_copy(deep=True)
             self._versions[doc.version_id] = stored
             self._mirror(f"version:{doc.version_id}", stored.model_dump())
@@ -99,7 +110,6 @@ class PolicyStore:
         *,
         expected_active: Optional[str] = None,
     ) -> PolicyDocument:
-        """Atomic active-policy update with optimistic concurrency."""
         with self._lock:
             if expected_active is not None and self._active_id != expected_active:
                 raise ConcurrentModificationError(
