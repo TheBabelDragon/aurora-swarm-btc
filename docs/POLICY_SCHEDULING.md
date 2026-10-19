@@ -1,17 +1,35 @@
 # Policy & Scheduling Control Plane + MultiFlow
 
 **Branch:** `feat/aurora-policy-scheduling-multiflow`  
-**MultiFlow:** https://github.com/TheBabelDragon/MultiFlow  
+**MultiFlow upstream:** https://github.com/TheBabelDragon/MultiFlow  
 **Security:** `mods/aegis_42`
+
+## Why MultiFlow was not (fully) inlined initially
+
+MultiFlow is a **separate product**: own CI, versioning, optional CP-SAT/MILP extras, and a public demo. Copying the entire tree into Aurora would freeze a fork that drifts from upstream and bloated the mining image with solver deps operators may never enable.
+
+**What we do instead:**
+
+1. **Docker build** installs `multiflow` from upstream git (soft-fail if offline).
+2. **`vendor/`** path + `scripts/ensure_multiflow_vendor.sh` for offline classical core.
+3. **`requirements-multiflow.txt`** for host/venv installs.
+4. Feature flag **`AURORA_MULTIFLOW_ENABLED`** (default **off**) so baseline scheduler stays safe.
+
+```bash
+# Host / CI
+pip install -r requirements-multiflow.txt
+# or offline snapshot
+./scripts/ensure_multiflow_vendor.sh
+export PYTHONPATH="$PWD/vendor:${PYTHONPATH:-}"
+export AURORA_MULTIFLOW_ENABLED=1
+```
 
 ## What this is
 
-A control surface for Aurora’s distributed operations:
-
 - Editable **policy drafts** (preferences, not hard constraints)
 - **Dry-run simulation** and plan diffs
-- Explicit **activation** workflow with AEGIS-42 authorization
-- **MultiFlow** as a feature-flagged scheduling adapter (disabled by default)
+- Explicit **activation** with AEGIS-42 authorization
+- **Redis-durable** versions, active reference, and audit when CommsLayer/Redis is up
 - Baseline **Aurora scheduler** remains the fallback
 
 Initial preview values (unsaved — **not** active):
@@ -36,8 +54,6 @@ Initial preview values (unsaved — **not** active):
 | Recovery strategy enum | Route eligibility / security policy |
 | Activation mode | State freshness, retry budgets |
 
-A preference may rank feasible plans differently. It may **never** make an unauthorized or infeasible plan admissible.
-
 ## State machine
 
 ```
@@ -48,13 +64,19 @@ DRAFT → SIMULATED → VALIDATED → PENDING_APPROVAL → ACTIVE
 - **Approval:** requires explicit `approved=true` after validation.
 - **Controlled:** same gates; intended for future execution hand-off (still requires AEGIS).
 
-Activation mode cannot disable AEGIS-42 or remove hard constraints.
+## Durability
+
+When Redis is reachable via CommsLayer:
+
+- Policy versions, active id, draft, and audit are mirrored under `aurora:policy:*`
+- On restart, `PolicyStore.attach_comms` reloads them (`durable_store: true` in `/policy/status`)
+- Without Redis, behavior remains process-local (honest `durable_store: false`)
 
 ## API routes
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/policy/status` | Active, draft, preview, MultiFlow availability |
+| GET | `/policy/status` | Active, draft, preview, MultiFlow, durable_store |
 | GET | `/policy/versions` | Immutable version list |
 | GET | `/policy/audit` | Policy audit trail |
 | POST | `/policy/preview` | Update unsaved preview |
@@ -66,41 +88,14 @@ Activation mode cannot disable AEGIS-42 or remove hard constraints.
 | POST | `/policy/rollback` | New version from historical prefs |
 | GET | `/policy/compare?a=&b=` | Preference diff |
 
-Mutations respect `AURORA_DASHBOARD_API_KEY` when set.
-
-## MultiFlow adapter
-
-- Flag: `AURORA_MULTIFLOW_ENABLED` (default **off**)
-- When off or package missing: truthful `availability` status; local ranking estimates only; **no** false “operational” claim
-- When on and `multiflow` importable: uses `LiveEngine` + independent validator path
-- Execution dispatch through MultiFlow remains gated; shadow is the safe default
-
-Install MultiFlow separately if you want the real solver path:
-
-```bash
-pip install -e /path/to/MultiFlow
-export AURORA_MULTIFLOW_ENABLED=1
-```
-
-## Operator walkthrough (shadow)
-
-1. Open dashboard → **Policy & Scheduling Rules** panel.
-2. Adjust sliders (preview only).
-3. **Save draft** → confirm `active_unchanged`.
-4. **Simulate** → inspect plan diff; `side_effect_free: true`.
-5. **Validate** → check `validation_ok`.
-6. **Request activation** → shadow records active version; live mining/scheduling path unchanged.
-7. `/policy/audit` → verify history.
-8. **Rollback** via API with a prior `version_id` if needed.
-
-## AEGIS & audit limitations
-
-- Activation/rollback go through AEGIS capability/trust checks when AEGIS is running.
-- Policy audit is process-local (same class of durability as AEGIS v0 audit).
-- Do not claim restart-safe durable audit until a persistent store is wired.
-
 ## Tests
 
 ```bash
 python -m pytest tests/test_policy_scheduling.py -q
 ```
+
+## Remaining limitations
+
+- Controlled mode does **not** yet replace the autonomous scheduler loop with MultiFlow dispatch.
+- Optional solvers (OR-Tools, PuLP) are not installed by default.
+- Full MultiFlow source tree is not permanently mirrored file-by-file; use the install/vendor paths above.
