@@ -1,0 +1,2 @@
+# MultiFlow classical core may live here (see scripts/ensure_multiflow_vendor.sh).
+# Dockerfile COPY vendor/ requires this directory to exist.
