@@ -61,6 +61,23 @@ def _init_destination_routing(get_comms: Callable[[], Any]) -> None:
         logger.warning("destination routing init skipped: %s", e)
 
 
+def _init_aegis(get_comms: Callable[[], Any]) -> None:
+    """Start AEGIS-42 security oversight as part of node lifecycle."""
+    try:
+        from mods.aegis_42 import start_aegis
+
+        comms = get_comms()
+        node_id = getattr(comms, "node_id", None)
+        aegis = start_aegis(node_id=node_id, comms=comms)
+        logger.info(
+            "AEGIS-42 started (enabled=%s node=%s)",
+            aegis.enabled,
+            aegis.node_id,
+        )
+    except Exception as e:
+        logger.warning("AEGIS-42 init skipped: %s", e)
+
+
 def boot(
     app: Any,
     *,
@@ -213,5 +230,14 @@ def boot(
 
     _init_destination_routing(get_comms)
 
+    # AEGIS-42: first-class security oversight (model-independent baseline)
+    _init_aegis(get_comms)
+    try:
+        from mods.aegis_42.routes import install_aegis_routes
+
+        install_aegis_routes(app)
+    except Exception as e:
+        logger.warning(f"aegis routes: {e}")
+
     app.state.aurora_booted = True
-    logger.info("boot complete (mining_standalone + mine_governor + routing)")
+    logger.info("boot complete (mining_standalone + mine_governor + routing + aegis-42)")
