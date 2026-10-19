@@ -1,16 +1,19 @@
-"""Immutable policy version store.
+"""Immutable policy version store with optional Redis durability.
 
-In-process primary store; optional Redis mirror via CommsLayer when attached.
-Active versions are never rewritten; pre-active workflow may progress status
-once per version_id (draft→simulated→validated→pending).
+When CommsLayer is attached, versions / active_id / audit are mirrored to
+Redis keys under policy:* and reloaded on attach (restart-safe when Redis
+persists). In-process remains the primary working set.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any, Dict, List, Optional
 
 from .schema import AuditEntry, PolicyDocument, PolicyStatus, SimulationResult
+
+logger = logging.getLogger("aurora.policy.store")
 
 _WORKING = {
     PolicyStatus.DRAFT,
@@ -39,17 +42,73 @@ class PolicyStore:
         self._audit: List[AuditEntry] = []
         self._max_audit = 2000
         self._comms = None
+        self._durable = False
 
     def attach_comms(self, comms: Any) -> None:
         self._comms = comms
+        self._load_from_redis()
+
+    @property
+    def durable(self) -> bool:
+        return self._durable
 
     def _mirror(self, key: str, value: Any) -> None:
         if self._comms is None:
             return
         try:
             self._comms.set_state(f"policy:{key}", value)
-        except Exception:
-            pass
+            self._durable = True
+        except Exception as e:
+            logger.debug("policy mirror failed: %s", e)
+
+    def _load_from_redis(self) -> None:
+        if self._comms is None:
+            return
+        try:
+            index = self._comms.get_state("policy:version_index")
+            if isinstance(index, list):
+                for vid in index:
+                    raw = self._comms.get_state(f"policy:version:{vid}")
+                    if isinstance(raw, dict):
+                        try:
+                            doc = PolicyDocument.model_validate(raw)
+                            self._versions[doc.version_id] = doc
+                        except Exception:
+                            continue
+            active = self._comms.get_state("policy:active_id")
+            if isinstance(active, str) and active in self._versions:
+                self._active_id = active
+            draft_raw = self._comms.get_state("policy:draft")
+            if isinstance(draft_raw, dict):
+                try:
+                    self._draft = PolicyDocument.model_validate(draft_raw)
+                except Exception:
+                    self._draft = None
+            audit_raw = self._comms.get_state("policy:audit")
+            if isinstance(audit_raw, list):
+                for item in audit_raw:
+                    try:
+                        self._audit.append(AuditEntry.model_validate(item))
+                    except Exception:
+                        continue
+            self._durable = True
+            logger.info(
+                "policy store loaded from Redis (versions=%s active=%s audit=%s)",
+                len(self._versions),
+                self._active_id,
+                len(self._audit),
+            )
+        except Exception as e:
+            logger.warning("policy Redis load skipped: %s", e)
+            self._durable = False
+
+    def _persist_index(self) -> None:
+        self._mirror("version_index", list(self._versions.keys()))
+        self._mirror("active_id", self._active_id)
+        self._mirror(
+            "audit",
+            [e.model_dump() for e in self._audit[-self._max_audit :]],
+        )
 
     def get_draft(self) -> Optional[PolicyDocument]:
         with self._lock:
@@ -69,7 +128,6 @@ class PolicyStore:
             self._mirror("draft", None)
 
     def put_version(self, doc: PolicyDocument) -> PolicyDocument:
-        """Insert or progress a pre-active version. Active/superseded records are frozen."""
         with self._lock:
             existing = self._versions.get(doc.version_id)
             if existing is not None:
@@ -77,10 +135,10 @@ class PolicyStore:
                     raise ValueError(f"Version {doc.version_id} is immutable")
                 if existing.status not in _PRE_ACTIVE:
                     raise ValueError(f"Version {doc.version_id} is immutable")
-                # allow status progression on the same id before activation
             stored = doc.model_copy(deep=True)
             self._versions[doc.version_id] = stored
             self._mirror(f"version:{doc.version_id}", stored.model_dump())
+            self._persist_index()
             return stored.model_copy(deep=True)
 
     def get_version(self, version_id: str) -> Optional[PolicyDocument]:
@@ -121,11 +179,15 @@ class PolicyStore:
                 prior = self._versions[self._active_id]
                 if prior.status == PolicyStatus.ACTIVE:
                     self._versions[self._active_id] = prior.mark(PolicyStatus.SUPERSEDED)
+                    self._mirror(
+                        f"version:{self._active_id}",
+                        self._versions[self._active_id].model_dump(),
+                    )
             doc = self._versions[version_id].mark(PolicyStatus.ACTIVE)
             self._versions[version_id] = doc
             self._active_id = version_id
-            self._mirror("active_id", version_id)
             self._mirror(f"version:{version_id}", doc.model_dump())
+            self._persist_index()
             return doc.model_copy(deep=True)
 
     def put_simulation(self, sim: SimulationResult) -> SimulationResult:
@@ -143,6 +205,7 @@ class PolicyStore:
             self._audit.append(entry)
             if len(self._audit) > self._max_audit:
                 self._audit = self._audit[-self._max_audit :]
+            self._mirror("audit", [e.model_dump() for e in self._audit])
             return entry.model_copy(deep=True)
 
     def list_audit(self, limit: int = 50) -> List[AuditEntry]:
