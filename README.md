@@ -69,6 +69,7 @@ Optional edits in `.env`:
 | `AURORA_DASHBOARD_API_KEY` | If set, mutation APIs require `X-API-Key` |
 | `AURORA_MESH_SECRET` | Shared HMAC secret for LAN discovery auth |
 | `AEGIS_ENABLED` | AEGIS-42 security oversight (default `1`; set `0` to disable) |
+| `AURORA_MULTIFLOW_ENABLED` | MultiFlow scheduling adapter (default `0`; requires [MultiFlow](https://github.com/TheBabelDragon/MultiFlow)) |
 
 Solo Redis binds **127.0.0.1 only** (no unauthenticated exposure on the LAN).
 
@@ -96,6 +97,7 @@ xdg-open http://127.0.0.1:8000
 
 - **Start mining** when you want hashes (CPU path is default).
 - **Comms / Destination Routing** panels work without curl.
+- **Policy & Scheduling Rules** panel for drafts, dry-run, and shadow activation.
 - Mesh join on the same LAN is automatic via UDP **7379** when discovery is enabled.
 
 ### 5. Sanity checks
@@ -104,6 +106,7 @@ xdg-open http://127.0.0.1:8000
 curl -s http://127.0.0.1:8000/comms/status | python -m json.tool
 curl -s http://127.0.0.1:8000/comms/network/status | python -m json.tool
 curl -s http://127.0.0.1:8000/aegis/status | python -m json.tool
+curl -s http://127.0.0.1:8000/policy/status | python -m json.tool
 docker compose -f docker-compose.solo.yml logs --tail=50 dashboard
 ```
 
@@ -186,20 +189,41 @@ Full design, threat model, and non-goals: **`docs/AEGIS_42.md`**.
 
 ---
 
+## Policy & Scheduling + MultiFlow
+
+Control plane for editable scheduling **preferences** (not hard constraints), dry-run simulation, and explicit activation. Integrates [MultiFlow](https://github.com/TheBabelDragon/MultiFlow) as an optional adapter.
+
+- **Default activation mode: shadow** — compare plans without changing live execution
+- Preferences: latency / load-balancing / energy (0–100), recovery strategy, activation mode
+- Hard constraints (worker health, AEGIS quarantine/revocation, capacity) cannot be overridden by the UI
+- MultiFlow off by default (`AURORA_MULTIFLOW_ENABLED=0`); baseline Aurora scheduler remains the fallback
+- AEGIS-42 authorizes activation and rollback
+- API: `/policy/status`, `/policy/draft/save`, `/policy/simulate`, `/policy/validate`, `/policy/activate`, `/policy/rollback`, `/policy/versions`, `/policy/audit`
+
+```bash
+curl -s http://127.0.0.1:8000/policy/status | python -m json.tool
+python -m pytest tests/test_policy_scheduling.py -q
+```
+
+Operator guide: **`docs/POLICY_SCHEDULING.md`**.
+
+---
+
 ## Architecture
 
 | Piece | Role |
 |-------|------|
 | `comms/layer.py` | Mesh: register, heartbeat, targeted + broadcast |
 | `comms/routing/` | Destination discovery + gateway routing |
-| `dashboard/` | UI + mining status + routing panel |
+| `dashboard/` | UI + mining status + routing + policy rules |
 | `mods/aegis_42` | Security oversight: policy, identity, audit, containment |
+| `mods/policy_scheduling` | Policy drafts, MultiFlow adapter, activation workflow |
 | `mods/mining_engine` | Stratum / CPU hashing |
 | `mods/asset_fabric` | Asset object, possession, history, Bitcoin clock |
 | `mods/btc_anchor` | Commitment, inclusion, reorg |
 | `mods/torrent_protocol` | Piece transport |
 | `mods/evidence_integrity` | Shared Evidence Contract |
-| `scheduler/` | Recovery + mod hooks |
+| `scheduler/` | Recovery + mod hooks (baseline) |
 | `sensing/` | Contract with wifi-sensing-system |
 | `mods/metafield_bridge` | MetaField stats → mesh |
 
@@ -215,6 +239,7 @@ Shared truth lives on **one Redis**. LAN discovery uses UDP **7379**.
 - Optional `AURORA_DASHBOARD_API_KEY` protects mutation endpoints
 - Public TCP relay remains disabled
 - AEGIS-42 enabled by default; model-independent baseline policy on node boot
+- MultiFlow adapter disabled until explicitly enabled and package available
 
 ---
 
@@ -227,7 +252,8 @@ python -m pytest tests/test_destination_routing.py \
   tests/test_routing_live_caller.py \
   tests/test_routing_security_hardening.py \
   tests/test_evidence_integrity.py \
-  tests/test_aegis_42.py -q
+  tests/test_aegis_42.py \
+  tests/test_policy_scheduling.py -q
 ```
 
 ---
@@ -248,6 +274,7 @@ See `INTEGRATION_CONTRACT.md`.
 | `docs/DESTINATION_ROUTING.md` | Destination resolve, routes, delivery semantics |
 | `docs/SHARED_EVIDENCE_CONTRACT.md` | Evidence integrity |
 | `docs/AEGIS_42.md` | Security oversight architecture and threat model |
+| `docs/POLICY_SCHEDULING.md` | Policy control plane + MultiFlow adapter |
 | `docs/ARCHITECTURE.md` | Layer stack (content → fabric → torrent → BTC) |
 | `INTEGRATION_CONTRACT.md` | Sensing ↔ swarm ↔ MetaField |
 
