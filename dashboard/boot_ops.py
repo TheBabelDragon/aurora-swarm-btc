@@ -78,6 +78,20 @@ def _init_aegis(get_comms: Callable[[], Any]) -> None:
         logger.warning("AEGIS-42 init skipped: %s", e)
 
 
+def _init_policy_scheduling(get_comms: Callable[[], Any]) -> None:
+    """Start Policy & Scheduling control plane (MultiFlow adapter, shadow default)."""
+    try:
+        from mods.policy_scheduling import start_policy_service
+
+        svc = start_policy_service(get_comms())
+        logger.info(
+            "policy scheduling started (multiflow=%s)",
+            svc.adapter.availability.value,
+        )
+    except Exception as e:
+        logger.warning("policy scheduling init skipped: %s", e)
+
+
 def boot(
     app: Any,
     *,
@@ -239,5 +253,16 @@ def boot(
     except Exception as e:
         logger.warning(f"aegis routes: {e}")
 
+    # Policy & Scheduling + MultiFlow adapter (shadow by default)
+    _init_policy_scheduling(get_comms)
+    try:
+        from mods.policy_scheduling.routes import install_policy_routes
+
+        install_policy_routes(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"policy routes: {e}")
+
     app.state.aurora_booted = True
-    logger.info("boot complete (mining_standalone + mine_governor + routing + aegis-42)")
+    logger.info(
+        "boot complete (mining_standalone + mine_governor + routing + aegis-42 + policy-scheduling)"
+    )
