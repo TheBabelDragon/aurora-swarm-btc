@@ -28,39 +28,18 @@ logger = logging.getLogger("aurora.policy.service")
 _INSTANCE: Optional["PolicyService"] = None
 _LOCK = threading.Lock()
 
-# Valid transitions
-_TRANSITIONS = {
-    PolicyStatus.DRAFT: {PolicyStatus.SIMULATED, PolicyStatus.REJECTED},
-    PolicyStatus.SIMULATED: {PolicyStatus.VALIDATED, PolicyStatus.DRAFT, PolicyStatus.REJECTED},
-    PolicyStatus.VALIDATED: {
-        PolicyStatus.PENDING_APPROVAL,
-        PolicyStatus.ACTIVE,  # controlled / shadow path after gates
-        PolicyStatus.DRAFT,
-        PolicyStatus.REJECTED,
-    },
-    PolicyStatus.PENDING_APPROVAL: {
-        PolicyStatus.ACTIVE,
-        PolicyStatus.REJECTED,
-        PolicyStatus.DRAFT,
-    },
-    PolicyStatus.ACTIVE: {PolicyStatus.SUPERSEDED},
-}
-
 
 class PolicyService:
     def __init__(self) -> None:
         self.store = PolicyStore()
         self.adapter = MultiFlowAdapter()
         self._comms = None
-        # Working draft (unsaved preview can differ)
         self._preview: Dict[str, Any] = dict(INITIAL_DRAFT)
         self._preview_dirty = False
 
     def attach_comms(self, comms: Any) -> None:
         self._comms = comms
         self.store.attach_comms(comms)
-
-    # --- Preview / draft ---
 
     def get_status(self) -> Dict[str, Any]:
         active = self.store.get_active()
@@ -74,13 +53,13 @@ class PolicyService:
             "initial_draft": dict(INITIAL_DRAFT),
             "multiflow": self.adapter.status(),
             "baseline_scheduler": "aurora-scheduler",
+            "durable_store": bool(getattr(self.store, "durable", False)),
             "execution_mode": (
                 active.preferences.activation_mode.value if active else "shadow"
             ),
         }
 
     def update_preview(self, patch: Dict[str, Any]) -> Dict[str, Any]:
-        """Update unsaved preview only — does not mutate active policy."""
         allowed = set(INITIAL_DRAFT.keys())
         unknown = set(patch.keys()) - allowed
         if unknown:
@@ -118,8 +97,6 @@ class PolicyService:
         self._preview_dirty = False
         self.store.append_audit(AuditEntry(action="discard_draft", actor=actor))
 
-    # --- Simulate / validate ---
-
     def simulate(
         self,
         *,
@@ -130,7 +107,6 @@ class PolicyService:
     ) -> SimulationResult:
         draft = self.store.get_draft()
         if draft is None:
-            # use preview without promoting to active
             prefs = PolicyPreferences(**self._preview)
             draft = PolicyDocument(status=PolicyStatus.DRAFT, preferences=prefs, created_by=actor)
             draft = self.store.set_draft(draft)
@@ -154,7 +130,6 @@ class PolicyService:
         assert sim.side_effect_free is True
         self.store.put_simulation(sim)
 
-        # promote draft status to SIMULATED (immutable copy into versions)
         sim_doc = draft.model_copy(
             update={
                 "status": PolicyStatus.SIMULATED,
@@ -165,7 +140,6 @@ class PolicyService:
         try:
             self.store.put_version(sim_doc)
         except ValueError:
-            # already stored — update simulation link on draft only
             pass
         self.store.set_draft(sim_doc.model_copy(update={"status": PolicyStatus.SIMULATED}))
 
@@ -197,7 +171,6 @@ class PolicyService:
         summary = "schema ok"
         if sim is not None:
             ok = sim.admissible or sim.status in ("admissible", "unavailable")
-            # unavailable adapter still allows validation of policy schema
             if sim.status == "error":
                 ok = False
                 summary = "simulation error"
@@ -206,7 +179,6 @@ class PolicyService:
             else:
                 summary = f"simulation status={sim.status}"
 
-        # schema re-check
         PolicyPreferences.model_validate(draft.preferences.model_dump())
 
         new_status = PolicyStatus.VALIDATED if ok else PolicyStatus.REJECTED
@@ -234,8 +206,6 @@ class PolicyService:
         )
         return validated
 
-    # --- Activation / rollback ---
-
     def request_activation(
         self,
         *,
@@ -256,7 +226,6 @@ class PolicyService:
         if expected_active is None:
             expected_active = prior
 
-        # AEGIS authorization — fail closed
         auth = self._aegis_authorize_activation(actor, draft.version_id)
         if not auth.get("allowed"):
             self.store.append_audit(
@@ -301,8 +270,6 @@ class PolicyService:
                 "active_version_id": prior,
             }
 
-        # Shadow: record active reference for comparison only — does not dispatch
-        # Controlled/Approval (approved): set active reference
         try:
             active = self.store.set_active(
                 draft.version_id, expected_active=expected_active
@@ -353,7 +320,6 @@ class PolicyService:
             )
         )
         self._aegis_event("policy.activated", actor, active.version_id, "ok")
-        # Clear draft after successful activation
         self.store.discard_draft()
         self._preview_dirty = False
         return {
@@ -399,7 +365,6 @@ class PolicyService:
             )
             return {"ok": False, "reason": auth.get("reason"), "active_version_id": prior}
 
-        # New version based on historical preferences (history preserved)
         new_doc = PolicyDocument(
             status=PolicyStatus.VALIDATED,
             preferences=source.preferences,
@@ -450,8 +415,6 @@ class PolicyService:
         diff = {k: {"a": pa.get(k), "b": pb.get(k)} for k in pa if pa.get(k) != pb.get(k)}
         return {"version_a": version_a, "version_b": version_b, "preference_diff": diff}
 
-    # --- AEGIS helpers ---
-
     def _aegis_sets(
         self,
         quarantined: Optional[Set[str]],
@@ -467,7 +430,6 @@ class PolicyService:
                 for ident in aegis.identity.list_identities():
                     if ident.trust.revoked:
                         r.add(ident.identity_id)
-                # rate-limited actors treated as soft-quarantine for scheduling
                 for ident in aegis.identity.list_identities():
                     if aegis.containment.is_rate_limited(ident.identity_id):
                         q.add(ident.identity_id)
@@ -482,8 +444,6 @@ class PolicyService:
 
             aegis = get_aegis()
             if aegis is None:
-                # Fail closed only if AEGIS is expected; if never started, allow with warning
-                # but record — activation of policy is operator-level
                 return {"allowed": True, "reason": "AEGIS not running; operator path"}
 
             if aegis.identity.get(actor) is None:
@@ -494,7 +454,6 @@ class PolicyService:
                 except Exception:
                     pass
 
-            # Capability check: need policy_activate or operator trust
             caps = aegis.identity.capabilities_of(actor)
             trusted = aegis.identity.is_trusted(actor)
             if "policy_activate" not in caps and "*" not in caps and not trusted and actor not in (
@@ -507,16 +466,16 @@ class PolicyService:
             if aegis.containment.is_rate_limited(actor):
                 return {"allowed": False, "reason": "actor rate-limited"}
 
-            ev = make_event(
-                EventType.CAPABILITY_CHANGE,
-                EventSource.POLICY_ENGINE,
-                actor_id=actor,
-                severity="medium",
-                summary=f"Policy activation request {version_id}",
-                details={"version_id": version_id, "action": "activate"},
+            aegis.ingest(
+                make_event(
+                    EventType.CAPABILITY_CHANGE,
+                    EventSource.POLICY_ENGINE,
+                    actor_id=actor,
+                    severity="medium",
+                    summary=f"Policy activation request {version_id}",
+                    details={"version_id": version_id, "action": "activate"},
+                )
             )
-            # Observability only — do not treat tool policy as blocking operators
-            aegis.ingest(ev)
             return {"allowed": True, "reason": "authorized"}
         except Exception as e:
             logger.warning("AEGIS auth check failed closed: %s", e)
