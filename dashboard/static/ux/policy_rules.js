@@ -6,7 +6,11 @@
     var c = new AbortController();
     var t = setTimeout(function () { c.abort(); }, ms);
     return fetch(url, Object.assign({}, opts || {}, { signal: c.signal }))
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+      .then(function (r) {
+        return r.json().then(function (j) {
+          return { ok: r.ok, status: r.status, body: j };
+        });
+      })
       .finally(function () { clearTimeout(t); });
   }
   function payload() {
@@ -25,6 +29,9 @@
     var line = el("policy_status_line");
     if (line) line.textContent = "Unsaved preview changes (not active)";
   }
+  function show(obj) {
+    el("policy_out").textContent = JSON.stringify(obj, null, 2);
+  }
   window.polDirty = dirty;
   window.polRefresh = function () {
     jfetch("/policy/status", {}, 5000).then(function (res) {
@@ -37,9 +44,14 @@
       if (p.activation_mode) el("pol_mode").value = p.activation_mode;
       dirty();
       var mf = (d.multiflow || {}).availability || "?";
+      var draftId = (d.draft && d.draft.version_id) || "none";
+      var draftSt = (d.draft && d.draft.status) || "—";
       el("policy_status_line").textContent =
-        "Active: " + (d.active_version_id || "none") + " | dirty=" + !!d.preview_dirty + " | multiflow=" + mf;
-      el("policy_out").textContent = JSON.stringify(d, null, 2);
+        "Active: " + (d.active_version_id || "none") +
+        " | draft: " + draftId + " (" + draftSt + ")" +
+        " | dirty=" + !!d.preview_dirty +
+        " | multiflow=" + mf;
+      show(d);
     }).catch(function (e) {
       el("policy_status_line").textContent = "Policy service unavailable";
       el("policy_out").textContent = String(e);
@@ -51,13 +63,16 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload())
     }, 8000).then(function (res) {
-      el("policy_out").textContent = JSON.stringify(res.body, null, 2);
+      show(res.body);
       window.polRefresh();
     }).catch(function (e) { el("policy_out").textContent = "save failed: " + e; });
   };
   window.polDiscard = function () {
-    jfetch("/policy/draft/discard", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 5000)
-      .then(function () { window.polRefresh(); });
+    jfetch("/policy/draft/discard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    }, 5000).then(function () { window.polRefresh(); });
   };
   window.polSimulate = function () {
     jfetch("/policy/draft/save", {
@@ -65,15 +80,25 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload())
     }, 8000).then(function () {
-      return jfetch("/policy/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 15000);
+      return jfetch("/policy/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      }, 15000);
     }).then(function (res) {
-      el("policy_out").textContent = JSON.stringify(res.body, null, 2);
+      show(res.body);
+      window.polRefresh();
     }).catch(function (e) { el("policy_out").textContent = "simulate failed: " + e; });
   };
   window.polValidate = function () {
-    jfetch("/policy/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, 8000)
-      .then(function (res) { el("policy_out").textContent = JSON.stringify(res.body, null, 2); })
-      .catch(function (e) { el("policy_out").textContent = String(e); });
+    jfetch("/policy/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    }, 8000).then(function (res) {
+      show(res.body);
+      window.polRefresh();
+    }).catch(function (e) { el("policy_out").textContent = String(e); });
   };
   window.polActivate = function () {
     if (!confirm("Request policy activation? Shadow mode does not change live execution.")) return;
@@ -82,7 +107,30 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ approved: true })
     }, 8000).then(function (res) {
-      el("policy_out").textContent = JSON.stringify(res.body, null, 2);
+      show(res.body);
+      window.polRefresh();
+    }).catch(function (e) { el("policy_out").textContent = String(e); });
+  };
+  window.polVersions = function () {
+    jfetch("/policy/versions", {}, 5000).then(function (res) {
+      show(res.body);
+    }).catch(function (e) { el("policy_out").textContent = String(e); });
+  };
+  window.polAudit = function () {
+    jfetch("/policy/audit?limit=30", {}, 5000).then(function (res) {
+      show(res.body);
+    }).catch(function (e) { el("policy_out").textContent = String(e); });
+  };
+  window.polRollback = function () {
+    var id = prompt("Rollback to policy version_id (creates a NEW version from history):");
+    if (!id) return;
+    if (!confirm("Authorized rollback to " + id + "?")) return;
+    jfetch("/policy/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version_id: id, reason: "dashboard rollback" })
+    }, 8000).then(function (res) {
+      show(res.body);
       window.polRefresh();
     }).catch(function (e) { el("policy_out").textContent = String(e); });
   };
@@ -110,10 +158,13 @@
       "<button type=\"button\" onclick=\"polSimulate()\">Simulate (dry-run)</button>" +
       "<button type=\"button\" onclick=\"polValidate()\">Validate</button>" +
       "<button type=\"button\" onclick=\"polActivate()\">Request activation</button>" +
+      "<button type=\"button\" onclick=\"polVersions()\">Versions</button>" +
+      "<button type=\"button\" onclick=\"polAudit()\">Audit</button>" +
+      "<button type=\"button\" onclick=\"polRollback()\">Rollback…</button>" +
       "<button type=\"button\" onclick=\"polRefresh()\">Refresh</button>" +
       "</div>" +
-      "<pre id=\"policy_out\" class=\"mono muted\" style=\"max-height:220px;overflow:auto;margin-top:10px;white-space:pre-wrap\"></pre>" +
-      "<p class=\"muted\" style=\"font-size:12px\">Hard constraints (health, AEGIS quarantine, capacity) are not overridden by these sliders. MultiFlow: <a href=\"https://github.com/TheBabelDragon/MultiFlow\" target=\"_blank\" rel=\"noopener\">MultiFlow</a></p>";
+      "<pre id=\"policy_out\" class=\"mono muted\" style=\"max-height:240px;overflow:auto;margin-top:10px;white-space:pre-wrap\"></pre>" +
+      "<p class=\"muted\" style=\"font-size:12px\">Hard constraints (health, AEGIS quarantine, capacity) are not overridden by these sliders. MultiFlow: <a href=\"https://github.com/TheBabelDragon/MultiFlow\" target=\"_blank\" rel=\"noopener\">github.com/TheBabelDragon/MultiFlow</a></p>";
     routing.parentNode.insertBefore(card, routing.nextSibling);
     setTimeout(window.polRefresh, 600);
   }
