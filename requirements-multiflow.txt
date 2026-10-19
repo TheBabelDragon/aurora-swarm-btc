@@ -1,0 +1,9 @@
+# Optional: install MultiFlow from upstream (classical + optional extras)
+# Prefer vendor/multiflow for offline import; this installs the same package on PYTHONPATH.
+#
+#   pip install -r requirements-multiflow.txt
+#   # or with solvers:
+#   pip install "multiflow[cp-sat,milp] @ git+https://github.com/TheBabelDragon/MultiFlow.git"
+#
+# Still requires AURORA_MULTIFLOW_ENABLED=1 to use the adapter for proposes.
+multiflow @ git+https://github.com/TheBabelDragon/MultiFlow.git
