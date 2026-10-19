@@ -1,8 +1,8 @@
 """MultiFlow scheduling adapter.
 
 Feature-flagged (AURORA_MULTIFLOW_ENABLED, default off). Uses verified MultiFlow
-interfaces when the package is importable; otherwise reports unavailable and
-never pretends to dispatch work.
+interfaces when the package is importable (site-packages or vendor/); otherwise
+reports unavailable and never pretends to dispatch work.
 
 Baseline Aurora scheduler remains the execution path unless controlled
 activation explicitly hands off through this adapter after AEGIS authorization.
@@ -12,14 +12,23 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 import uuid
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from .schema import PolicyPreferences, SimulationResult
 
 logger = logging.getLogger("aurora.policy.multiflow")
+
+
+def _ensure_vendor_path() -> None:
+    """Prefer vendored MultiFlow under repo vendor/ so import works offline."""
+    root = Path(__file__).resolve().parents[2] / "vendor"
+    if root.is_dir() and str(root) not in sys.path:
+        sys.path.insert(0, str(root))
 
 
 class MultiFlowAvailability(str, Enum):
@@ -42,6 +51,7 @@ class MultiFlowAdapter:
         self._try_import()
 
     def _try_import(self) -> None:
+        _ensure_vendor_path()
         try:
             import multiflow  # type: ignore
 
@@ -67,6 +77,7 @@ class MultiFlowAdapter:
             "import_error": self._import_error,
             "package": "multiflow" if self._mf else None,
             "execution_enabled": False,  # shadow-first; never auto-dispatch
+            "vendor_path_checked": True,
         }
 
     def collect_snapshot(
@@ -76,7 +87,6 @@ class MultiFlowAdapter:
         quarantined: Optional[Set[str]] = None,
         revoked: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
-        """Normalized, versioned scheduling snapshot from observable Aurora state."""
         workers = workers or []
         quarantined = quarantined or set()
         revoked = revoked or set()
@@ -88,11 +98,7 @@ class MultiFlowAdapter:
             caps = list(w.get("capabilities") or [])
             meta = w.get("metadata") or {}
             healthy = meta.get("status") in (None, "mining", "idle", "online", "healthy")
-            if not healthy and meta.get("status") not in (None,):
-                # still list but mark capacity 0
-                capacity = 0
-            else:
-                capacity = 1
+            capacity = 1 if healthy or meta.get("status") in (None,) else 0
             resources.append(
                 {
                     "id": wid,
@@ -119,9 +125,7 @@ class MultiFlowAdapter:
         policy_version_id: str,
         current_plan: Optional[List[Dict[str, Any]]] = None,
     ) -> SimulationResult:
-        """Side-effect-free dry-run. Never dispatches jobs."""
         t0 = time.time()
-        warnings: List[str] = []
         current_plan = current_plan or []
         avail = self.availability
 
@@ -131,7 +135,6 @@ class MultiFlowAdapter:
                 MultiFlowAvailability.PACKAGE_MISSING: f"multiflow package unavailable: {self._import_error}",
                 MultiFlowAvailability.ERROR: "multiflow adapter error",
             }.get(avail, "unavailable")
-            # Local feasibility ranking without MultiFlow — estimate only
             proposed = self._local_rank(snapshot, preferences)
             added, removed, changed = self._diff_plans(current_plan, proposed)
             return SimulationResult(
@@ -152,7 +155,6 @@ class MultiFlowAdapter:
                 duration_ms=round((time.time() - t0) * 1000, 2),
             )
 
-        # Real MultiFlow path
         try:
             return self._simulate_with_multiflow(
                 preferences, snapshot, policy_version_id=policy_version_id, current_plan=current_plan, t0=t0
@@ -201,7 +203,6 @@ class MultiFlowAdapter:
                 )
             )
 
-        # Placeholder maintenance tasks — one soft assignment probe per healthy worker
         tasks = []
         for r in resources:
             if r.capacity <= 0:
@@ -231,9 +232,8 @@ class MultiFlowAdapter:
 
         problem = mf.SchedulingProblem(
             resources=resources,
-            tasks=tasks or [
-                mf.Task(id="noop", name="noop", requirements=[], window=window)
-            ],
+            tasks=tasks
+            or [mf.Task(id="noop", name="noop", requirements=[], window=window)],
             attributes={
                 "policy_weights": preferences.normalized_weights(),
                 "recovery_strategy": preferences.recovery_strategy.value,
@@ -252,7 +252,9 @@ class MultiFlowAdapter:
         proposed: List[Dict[str, Any]] = []
         if admissible_list:
             cand = admissible_list[0]
-            assignments = getattr(cand, "assignments", None) or (cand.get("assignments") if isinstance(cand, dict) else [])
+            assignments = getattr(cand, "assignments", None) or (
+                cand.get("assignments") if isinstance(cand, dict) else []
+            )
             for a in assignments or []:
                 if hasattr(a, "model_dump"):
                     proposed.append(a.model_dump())
@@ -287,7 +289,6 @@ class MultiFlowAdapter:
     def _local_rank(
         self, snapshot: Dict[str, Any], preferences: PolicyPreferences
     ) -> List[Dict[str, Any]]:
-        """Deterministic local ranking when MultiFlow is unavailable (estimate)."""
         weights = preferences.normalized_weights()
         plan = []
         for r in snapshot.get("resources") or []:
@@ -306,7 +307,6 @@ class MultiFlowAdapter:
                     "estimate": True,
                 }
             )
-        # prefer more load-balanced spread: already one task per worker
         return plan
 
     @staticmethod
