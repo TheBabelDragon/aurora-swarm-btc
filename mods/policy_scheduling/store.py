@@ -13,6 +13,15 @@ from typing import Any, Dict, List, Optional
 
 from .schema import AuditEntry, PolicyDocument, PolicyStatus, SimulationResult
 
+# Working-copy statuses allowed in the draft slot (not yet active)
+_WORKING = {
+    PolicyStatus.DRAFT,
+    PolicyStatus.SIMULATED,
+    PolicyStatus.VALIDATED,
+    PolicyStatus.PENDING_APPROVAL,
+    PolicyStatus.REJECTED,
+}
+
 
 class PolicyStore:
     def __init__(self) -> None:
@@ -42,8 +51,8 @@ class PolicyStore:
 
     def set_draft(self, doc: PolicyDocument) -> PolicyDocument:
         with self._lock:
-            if doc.status != PolicyStatus.DRAFT:
-                raise ValueError("Only DRAFT documents may be stored as draft")
+            if doc.status not in _WORKING:
+                raise ValueError(f"Working draft cannot hold status {doc.status}")
             self._draft = doc.model_copy(deep=True)
             self._mirror("draft", self._draft.model_dump())
             return self._draft.model_copy(deep=True)
@@ -98,7 +107,6 @@ class PolicyStore:
                 )
             if version_id not in self._versions:
                 raise KeyError(f"Unknown policy version {version_id}")
-            # supersede prior active
             if self._active_id and self._active_id in self._versions:
                 prior = self._versions[self._active_id]
                 if prior.status == PolicyStatus.ACTIVE:
