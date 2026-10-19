@@ -191,4 +191,9 @@ def root():
         html = "<h1>Aurora</h1><p>home_template.html missing — rebuild image</p>"
     if "/ux/mine.js" not in html:
         html = html.replace("</body>", '<script src="/ux/mine.js"></script>\n</body>')
+    if "/ux/policy_rules.js" not in html:
+        html = html.replace(
+            "</body>",
+            '<script src="/ux/policy_rules.js"></script>\n</body>',
+        )
     return HTMLResponse(content=html)
