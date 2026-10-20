@@ -230,6 +230,14 @@ def boot(
 
     _init_destination_routing(get_comms)
 
+    # Ecosystem control plane (registry, adapters, desired/observed state)
+    try:
+        from dashboard.control_ops import install_control_ops
+
+        install_control_ops(app, get_comms=get_comms)
+    except Exception as e:
+        logger.warning(f"control_ops: {e}")
+
     # AEGIS-42: first-class security oversight (model-independent baseline)
     _init_aegis(get_comms)
     try:
@@ -240,4 +248,4 @@ def boot(
         logger.warning(f"aegis routes: {e}")
 
     app.state.aurora_booted = True
-    logger.info("boot complete (mining_standalone + mine_governor + routing + aegis-42)")
+    logger.info("boot complete (mining_standalone + mine_governor + routing + control-plane + aegis-42)")
