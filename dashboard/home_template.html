@@ -210,6 +210,40 @@ async function refresh(){try{
     nccRefreshNodes(nodes.nodes||[]);
   }catch(e){}
   try{var ev=await jfetch('/events?limit=12',{},3000);document.getElementById('events').textContent=JSON.stringify(ev.events||ev,null,2).slice(0,2000);}catch(e){}
+  try{
+    var ts=await jfetch('/torrent/status',{},3000);
+    var tip=document.getElementById('artifact_tip');
+    var ch=(ts&&ts.chain)||{};
+    if(tip){
+      if(ch.height!=null){
+        tip.className='success';
+        tip.textContent='Artifact anchored at Bitcoin epoch '+ch.height+' · work '+(ch.work||'—')+' · '+(ch.block_hash||'').slice(0,16);
+      }else{
+        tip.className='muted';
+        tip.textContent='No Bitcoin tip — artifacts remain valid without an epoch.';
+      }
+    }
+    var tb=document.getElementById('artifact_rows');
+    if(tb){
+      var arts=(ts&&ts.artifacts)||[];
+      if(!arts.length){tb.innerHTML='<tr><td colspan="8" class="muted">'+(ts.note||'No artifacts yet')+'</td></tr>';}
+      else{
+        tb.innerHTML=arts.map(function(a){
+          var canon=a.reorged?'Reorged':(a.canonical?'Canonical':'Observed');
+          return '<tr>'
+            +'<td class="mono">'+(a.asset||'')+'</td>'
+            +'<td>'+(a.pieces||'')+'</td>'
+            +'<td>'+(a.possession||'')+'</td>'
+            +'<td>'+(a.epoch==null?'—':a.epoch)+'</td>'
+            +'<td>'+(a.btc_height==null?'—':a.btc_height)+'</td>'
+            +'<td>'+(a.anchor_status||'none')+'</td>'
+            +'<td>'+(a.confirmations==null?'—':a.confirmations)+'</td>'
+            +'<td>'+canon+'</td>'
+            +'</tr>';
+        }).join('');
+      }
+    }
+  }catch(e){}
 }catch(e){}}
 
 function nccRefreshNodes(list){
@@ -346,39 +380,22 @@ async function routeGateways(){
   catch(e){out.textContent='gateways failed: '+e;}
 }
 async function routeNetStatus(){
-  var el=document.getElementById('routing_status');
   var out=document.getElementById('routing_out');
-  try{
-    var d=await jfetch('/comms/network/status',{},4000);
-    var on=!!d.routing_enabled;
-    el.className=on?'success':'muted';
-    el.textContent=on?('Routing ON · egress '+(d.egress&&d.egress.enabled?'on':'off')+' · relay '+(d.egress&&d.egress.relay_implemented?'yes':'not implemented'))
-      :('Routing service ready (master switch off — resolve/send still work on mesh)');
-    if(out) out.textContent=JSON.stringify(d,null,2);
-  }catch(e){el.className='error';el.textContent='routing status unreachable';}
+  try{var d=await jfetch('/comms/network/status',{},5000);out.textContent=JSON.stringify(d,null,2);}
+  catch(e){out.textContent='network status failed: '+e;}
 }
 async function routeSend(){
   var t=(document.getElementById('route_target').value||'').trim();
-  var msg=(document.getElementById('route_msg').value||'').trim()||'ping';
+  var m=(document.getElementById('route_msg').value||'').trim();
   var out=document.getElementById('routing_out');
   if(!t){out.textContent='target required';return;}
   try{
-    var d=await jfetch('/comms/route_send',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({target:t,payload:{text:msg}})},8000);
-    out.textContent=JSON.stringify(d,null,2);
-    out.className='mono '+(d.ok?'success':'error');
+    var r=await fetch('/comms/route_send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:t,payload:{text:m||'ping'}})});
+    var d=await r.json().catch(function(){return {};});
+    out.textContent=JSON.stringify(d,null,2);out.className='mono '+(d.ok||d.status==='send_accepted'?'success':'error');
   }catch(e){out.textContent='send failed: '+e;out.className='mono error';}
 }
-if(typeof commsRegister!=='function'){
-  window.commsRegister=async function(){var r=document.getElementById('comms_result');try{var d=await jfetch('/comms/register',{method:'POST'},5000);r.textContent=d.ok?('registered '+d.node_id):(d.error||'fail');r.className=d.ok?'success':'error';}catch(e){r.textContent=String(e);r.className='error';}};
-  window.commsExport=async function(){try{var d=await jfetch('/comms/export',{},5000);document.getElementById('comms_export').textContent=JSON.stringify(d,null,2);}catch(e){document.getElementById('comms_export').textContent=String(e);}};
-  window.chatSend=async function(){var text=document.getElementById('chat_text').value||'';try{await jfetch('/comms/chat/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})},5000);document.getElementById('chat_text').value='';}catch(e){}};
-  window.refreshChatUsers=async function(){};
-  window.chatAddExternal=async function(){};
-}
-setTimeout(routeNetStatus,800);
-setInterval(routeNetStatus,15000);
 
-refresh();setInterval(refresh,4000);
+setInterval(refresh,4000);refresh();
 </script>
 </body></html>
