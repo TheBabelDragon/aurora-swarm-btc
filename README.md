@@ -15,7 +15,36 @@ HISTORY     replicated artifact memory
 EVIDENCE    integrity-checked evidence objects (mods/evidence_integrity)
 ```
 
-Bitcoin is not the artifact store. Bitcoin supplies an independently verifiable temporal/scarcity anchor.
+Bitcoin is not the artifact store.
+Bitcoin is not the torrent protocol.
+Bitcoin does not define artifact identity.
+Bitcoin supplies an independently verifiable temporal/scarcity anchor
+that turns "the swarm remembers this" into
+"the swarm remembers this relative to a globally costly chain position."
+
+An artifact can live without Bitcoin.
+Bitcoin can anchor an artifact without storing it.
+Torrent can transport an artifact without understanding Bitcoin.
+Asset Fabric can represent possession without trusting peers.
+Artifact history can be replicated independently.
+
+```
+BTC proof-of-work chain
+      │
+      ▼
+btc_anchor          canonical temporal anchor
+      │
+      ▼
+asset_fabric        artifact epoch / possession history
+      │
+      ▼
+torrent_protocol    piece distribution
+      │
+      ▼
+swarm peers
+```
+
+Public verbs: `ensure` / `publish` / `possession` / `history` / `clock` / `verify`.
 
 ## Shared Evidence Contract
 
@@ -192,7 +221,7 @@ Full design, threat model, and non-goals: **`docs/AEGIS_42.md`**.
 |-------|------|
 | `comms/layer.py` | Mesh: register, heartbeat, targeted + broadcast |
 | `comms/routing/` | Destination discovery + gateway routing |
-| `dashboard/` | UI + mining status + routing panel |
+| `dashboard/` | UI + mining status + routing panel + artifact clock |
 | `mods/aegis_42` | Security oversight: policy, identity, audit, containment |
 | `mods/mining_engine` | Stratum / CPU hashing |
 | `mods/asset_fabric` | Asset object, possession, history, Bitcoin clock |
@@ -204,6 +233,13 @@ Full design, threat model, and non-goals: **`docs/AEGIS_42.md`**.
 | `mods/metafield_bridge` | MetaField stats → mesh |
 
 Shared truth lives on **one Redis**. LAN discovery uses UDP **7379**.
+
+## Artifact clock
+
+`btc_height` is the coarse temporal coordinate. Cumulative work is scarcity weight.
+`observed_at` is informational. Local wall time is never the artifact epoch.
+
+Unanchored artifacts are valid assets with no authoritative Bitcoin epoch.
 
 ---
 
