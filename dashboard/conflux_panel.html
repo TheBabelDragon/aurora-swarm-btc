@@ -1,0 +1,63 @@
+<!-- Conflux lifecycle panel fragment — include near home_template bottom -->
+<div class="card" id="conflux_panel">
+<h2>Conflux — Software Lifecycle</h2>
+<p class="muted">Projects → Source → Changesets → Builds → Artifacts → Releases → Deployments (dry-run default). Mutations require AEGIS actor + API key when configured.</p>
+<div class="muted" style="margin-bottom:8px">
+mounted: <span id="conflux-mounted">…</span>
+· v<span id="conflux-version">…</span>
+· runner <span id="conflux-runner">…</span>
+· deploy <span id="conflux-deploy">…</span>
+· evidence <span id="conflux-evidence">…</span>
+</div>
+<div class="muted" style="font-size:.85em;margin-bottom:8px">caps: <span id="conflux-caps">…</span></div>
+<div id="conflux-mount-error" class="error"></div>
+
+<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
+<input id="conflux_actor_id" placeholder="X-Actor-Id (provisioned)" style="min-width:160px">
+<input id="conflux_api_key" placeholder="X-API-Key (optional)" type="password" style="min-width:140px">
+<button type="button" class="small" onclick="ConfluxPanel && ConfluxPanel.reload()">Refresh</button>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
+<input id="conflux_proj_name" placeholder="new project name" style="min-width:140px">
+<button type="button" onclick="ConfluxPanel && ConfluxPanel.createProject()">Create project</button>
+<select id="conflux_project_sel" onchange="ConfluxPanel && ConfluxPanel.loadLists()" style="min-width:180px"><option value="">— project —</option></select>
+<input id="conflux_rel_ver" placeholder="version" value="0.1.0" style="width:80px">
+<input id="conflux_rel_rev" placeholder="revision" value="HEAD" style="width:100px">
+<button type="button" onclick="ConfluxPanel && ConfluxPanel.createRelease()">Create release</button>
+<input id="conflux_dep_release" placeholder="release_id for dry-run" style="min-width:140px">
+<button type="button" onclick="ConfluxPanel && ConfluxPanel.planDryRun()">Plan+execute dry-run</button>
+</div>
+<div id="conflux_msg" class="muted" style="min-height:18px;margin-bottom:8px"></div>
+
+<div style="overflow-x:auto;margin-bottom:12px">
+<strong>Projects</strong>
+<table><thead><tr><th>ID</th><th>Name</th><th>By</th><th>Sources</th></tr></thead>
+<tbody id="conflux_projects_body"><tr><td colspan="4" class="muted">…</td></tr></tbody></table>
+</div>
+<div style="overflow-x:auto;margin-bottom:12px">
+<strong>Changesets</strong>
+<table><thead><tr><th>ID</th><th>Status</th><th>Author</th><th>Files</th></tr></thead>
+<tbody id="conflux_cs_body"><tr><td colspan="4" class="muted">…</td></tr></tbody></table>
+</div>
+<div style="overflow-x:auto;margin-bottom:12px">
+<strong>Builds</strong>
+<table><thead><tr><th>ID</th><th>Status</th><th>Manifest</th><th>Artifacts</th></tr></thead>
+<tbody id="conflux_builds_body"><tr><td colspan="4" class="muted">…</td></tr></tbody></table>
+</div>
+<div style="overflow-x:auto;margin-bottom:12px">
+<strong>Artifacts</strong>
+<table><thead><tr><th>ID</th><th>Hash</th><th>Name</th><th>Bytes</th></tr></thead>
+<tbody id="conflux_arts_body"><tr><td colspan="4" class="muted">…</td></tr></tbody></table>
+</div>
+<div style="overflow-x:auto;margin-bottom:12px">
+<strong>Releases</strong>
+<table><thead><tr><th>ID</th><th>Version</th><th>Status</th><th>Promoted by</th></tr></thead>
+<tbody id="conflux_rels_body"><tr><td colspan="4" class="muted">…</td></tr></tbody></table>
+</div>
+<div style="overflow-x:auto">
+<strong>Deployments</strong>
+<table><thead><tr><th>ID</th><th>Status</th><th>Release</th><th>Target</th></tr></thead>
+<tbody id="conflux_deps_body"><tr><td colspan="4" class="muted">…</td></tr></tbody></table>
+</div>
+</div>
