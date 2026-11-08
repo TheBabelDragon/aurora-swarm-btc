@@ -14,16 +14,16 @@ from conflux.config import ConfluxConfig
 from conflux.coordination.changes import ChangesetCoordinator
 from conflux.build.runner import SafeTestRunner
 from conflux.deployment.adapter import DryRunDeploymentAdapter
-from conflux.models.artifact import ArtifactManifest, ArtifactRef
+from conflux.models.artifact import ArtifactRef
 from conflux.models.build import BuildManifest, BuildRecord, BuildStatus
 from conflux.models.changeset import Changeset, FileChange
 from conflux.models.deployment import Deployment, DeploymentPlan, DeploymentStatus
-from conflux.models.evidence import EvidenceRef, ProvenanceRecord
 from conflux.models.project import Project, SourceRef
 from conflux.models.release import Release, ReleaseStatus
 from conflux.models.source import SourceRevision
 from conflux.source.git_adapter import GitSourceAdapter
 from conflux.storage.persistence import ConfluxStore, MemoryStore
+from conflux.verification.evidence_bridge import EvidenceBridge
 
 logger = logging.getLogger("conflux.service")
 
@@ -36,6 +36,7 @@ class ConfluxService:
         *,
         config: Optional[ConfluxConfig] = None,
         store: Optional[ConfluxStore] = None,
+        evidence: Optional[EvidenceBridge] = None,
     ) -> None:
         self.config = config or ConfluxConfig.from_env()
         self.store = store or MemoryStore()
@@ -43,19 +44,52 @@ class ConfluxService:
         self.changes = ChangesetCoordinator(self.store)
         self.runner = SafeTestRunner()
         self.deploy_adapter = DryRunDeploymentAdapter()
+        self.evidence = evidence if evidence is not None else EvidenceBridge()
         self._started_at = time.time()
+
+    def _ev(
+        self,
+        event_type: str,
+        *,
+        entity_id: str,
+        project_id: str = "",
+        source_revision_id: str = "",
+        build_id: str = "",
+        release_id: str = "",
+        deployment_id: str = "",
+        actor_id: str = "",
+        outcome: str = "",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        try:
+            return self.evidence.record(
+                event_type,
+                entity_id=entity_id,
+                project_id=project_id,
+                source_revision_id=source_revision_id,
+                build_id=build_id,
+                release_id=release_id,
+                deployment_id=deployment_id,
+                actor_id=actor_id,
+                outcome=outcome,
+                extra=extra,
+            )
+        except Exception as e:
+            logger.debug("evidence record skipped: %s", e)
+            return None
 
     # ── status ──────────────────────────────────────────────────────────
 
     def status(self) -> dict:
         return {
             "service": "conflux",
-            "version": "0.1.0",
+            "version": "0.1.1",
             "schema_id": "aurora.conflux",
             "runner_enabled": self.config.runner_enabled,
             "local_deploy_enabled": self.config.local_deploy_enabled,
             "storage": type(self.store).__name__,
             "uptime_s": round(time.time() - self._started_at, 1),
+            "evidence": self.evidence.status(),
             "capabilities": [
                 "project_registry",
                 "git_source",
@@ -64,6 +98,7 @@ class ConfluxService:
                 "build_records",
                 "dry_run_deployment",
                 "immutable_releases",
+                "evidence_bridge",
             ],
         }
 
@@ -72,6 +107,7 @@ class ConfluxService:
     def create_project(self, name: str, *, description: str = "", created_by: str = "") -> Project:
         p = Project.new(name, description=description, created_by=created_by)
         self.store.put("projects", p.project_id, p.to_dict())
+        self._ev("project.create", entity_id=p.project_id, project_id=p.project_id, actor_id=created_by, outcome="created")
         return p
 
     def get_project(self, project_id: str) -> Optional[Project]:
@@ -105,6 +141,7 @@ class ConfluxService:
         p.content_hash = Project._hash(p)
         self.store.put("projects", p.project_id, p.to_dict())
         self.store.put("sources", sid, src.to_dict())
+        self._ev("source.add", entity_id=sid, project_id=project_id, outcome="added", extra={"kind": kind})
         return src
 
     def list_sources(self, project_id: str) -> List[SourceRef]:
@@ -154,7 +191,16 @@ class ConfluxService:
             intent=intent,
             files=fcs,
         )
-        return self.changes.create(cs)
+        created = self.changes.create(cs)
+        self._ev(
+            "changeset.create",
+            entity_id=created.changeset_id,
+            project_id=project_id,
+            source_revision_id=base_revision_id,
+            actor_id=author or agent_id,
+            outcome="proposed",
+        )
+        return created
 
     def get_changeset(self, changeset_id: str) -> Optional[Changeset]:
         return self.changes.get(changeset_id)
@@ -163,10 +209,34 @@ class ConfluxService:
         return self.changes.list(**kwargs)
 
     def reconcile_changeset(self, changeset_id: str, peer_ids: Optional[List[str]] = None) -> dict:
-        return self.changes.reconcile(changeset_id, peer_ids=peer_ids)
+        result = self.changes.reconcile(changeset_id, peer_ids=peer_ids)
+        self._ev(
+            "changeset.reconcile",
+            entity_id=changeset_id,
+            outcome="ok" if result.get("ok") else "conflict",
+            extra={"peer_ids": peer_ids or []},
+        )
+        return result
 
     def approve_changeset(self, changeset_id: str, *, approved_by: str) -> dict:
-        return self.changes.approve(changeset_id, approved_by=approved_by)
+        result = self.changes.approve(changeset_id, approved_by=approved_by)
+        h = self._ev(
+            "changeset.approval",
+            entity_id=changeset_id,
+            actor_id=approved_by,
+            outcome="approved" if result.get("ok") else result.get("error", "denied"),
+        )
+        if h and result.get("ok"):
+            result["evidence_hash"] = h
+            cs = self.changes.get(changeset_id)
+            if cs:
+                cs.evidence_refs = list(getattr(cs, "evidence_refs", []) or []) + [h]
+                # best-effort: store may already hold the changeset from approve
+                try:
+                    self.store.put("changesets", cs.changeset_id, cs.to_dict())
+                except Exception:
+                    pass
+        return result
 
     # ── builds ──────────────────────────────────────────────────────────
 
@@ -178,6 +248,7 @@ class ConfluxService:
         changeset_ids: Optional[List[str]] = None,
         instructions: Optional[List[str]] = None,
         run: bool = False,
+        actor_id: str = "",
     ) -> Optional[BuildRecord]:
         if not self.get_project(project_id):
             return None
@@ -192,11 +263,39 @@ class ConfluxService:
             manifest,
             enabled=run and self.config.runner_enabled,
         )
-        # Persist synthetic artifacts if any
         for ad in record.metadata.get("artifacts") or []:
             art = ArtifactRef.from_dict(ad)
             self.store.put("artifacts", art.artifact_id, art.to_dict())
+            self._ev(
+                "artifact.publication",
+                entity_id=art.artifact_id,
+                project_id=project_id,
+                build_id=record.build_id,
+                source_revision_id=source_revision_id,
+                outcome="published",
+                extra={"content_hash": art.content_hash},
+            )
         self.store.put("builds", record.build_id, record.to_dict())
+        h = self._ev(
+            "build.completion",
+            entity_id=record.build_id,
+            project_id=project_id,
+            source_revision_id=source_revision_id,
+            build_id=record.build_id,
+            actor_id=actor_id,
+            outcome=record.status.value if hasattr(record.status, "value") else str(record.status),
+        )
+        if h:
+            record.evidence_refs = list(record.evidence_refs or []) + [h]
+            self.store.put("builds", record.build_id, record.to_dict())
+        self._ev(
+            "build.verification",
+            entity_id=record.build_id,
+            project_id=project_id,
+            build_id=record.build_id,
+            outcome=str((record.verification_results or {}).get("runner", "unknown")),
+            extra=dict(record.verification_results or {}),
+        )
         return record
 
     def get_build(self, build_id: str) -> Optional[BuildRecord]:
@@ -251,6 +350,19 @@ class ConfluxService:
             changeset_ids=changeset_ids,
             created_by=created_by,
         )
+        h = self._ev(
+            "release.creation",
+            entity_id=rel.release_id,
+            project_id=project_id,
+            source_revision_id=source_revision_id,
+            build_id=build_id,
+            release_id=rel.release_id,
+            actor_id=created_by,
+            outcome="candidate",
+            extra={"version": version},
+        )
+        if h:
+            rel.verification_evidence_ids = list(rel.verification_evidence_ids or []) + [h]
         self.store.put("releases", rel.release_id, rel.to_dict())
         return rel
 
@@ -277,7 +389,6 @@ class ConfluxService:
             return {"ok": False, "error": "release_revoked"}
         if rel.status == ReleaseStatus.PROMOTED:
             return {"ok": False, "error": "already_promoted"}
-        # Gate: prefer verified builds when present
         if rel.build_id:
             b = self.get_build(rel.build_id)
             if b and b.status not in (BuildStatus.SUCCEEDED, BuildStatus.SKIPPED):
@@ -285,8 +396,20 @@ class ConfluxService:
         rel.status = ReleaseStatus.PROMOTED
         rel.promoted_at = time.time()
         rel.promoted_by = promoted_by
+        h = self._ev(
+            "release.promotion",
+            entity_id=rel.release_id,
+            project_id=rel.project_id,
+            source_revision_id=rel.source_revision_id,
+            build_id=rel.build_id,
+            release_id=rel.release_id,
+            actor_id=promoted_by,
+            outcome="promoted",
+        )
+        if h:
+            rel.approval_evidence_ids = list(rel.approval_evidence_ids or []) + [h]
         self.store.put("releases", rel.release_id, rel.to_dict())
-        return {"ok": True, "release": rel.to_dict()}
+        return {"ok": True, "release": rel.to_dict(), "evidence_hash": h}
 
     # ── deployments ─────────────────────────────────────────────────────
 
@@ -313,6 +436,15 @@ class ConfluxService:
             rollback_release_id=rollback_release_id,
         )
         self.store.put("deployment_plans", plan.plan_id, plan.to_dict())
+        self._ev(
+            "deployment.planning",
+            entity_id=plan.plan_id,
+            project_id=project_id,
+            release_id=release_id,
+            actor_id=created_by,
+            outcome="planned",
+            extra={"adapter": adapter, "target_id": target_id},
+        )
         return plan
 
     def execute_deployment(
@@ -337,8 +469,19 @@ class ConfluxService:
             dep.status = DeploymentStatus.FAILED
             dep.error = "non_dry_run_disabled_in_v0_1"
             dep.finished_at = time.time()
+        h = self._ev(
+            "deployment.outcome",
+            entity_id=dep.deployment_id,
+            project_id=dep.project_id,
+            release_id=dep.release_id,
+            deployment_id=dep.deployment_id,
+            actor_id=authorized_by,
+            outcome=dep.status.value if hasattr(dep.status, "value") else str(dep.status),
+        )
+        if h:
+            dep.audit_refs = list(dep.audit_refs or []) + [h]
         self.store.put("deployments", dep.deployment_id, dep.to_dict())
-        return {"ok": True, "deployment": dep.to_dict()}
+        return {"ok": True, "deployment": dep.to_dict(), "evidence_hash": h}
 
     def get_deployment(self, deployment_id: str) -> Optional[Deployment]:
         d = self.store.get("deployments", deployment_id)
@@ -373,7 +516,6 @@ class ConfluxService:
         rb = self.get_release(plan.rollback_release_id)
         if not rb:
             return {"ok": False, "error": "rollback_release_not_found"}
-        # Plan a dry-run rollback deployment
         rb_plan = self.plan_deployment(
             dep.project_id,
             plan.rollback_release_id,
@@ -387,14 +529,31 @@ class ConfluxService:
         if result.get("ok"):
             dep.status = DeploymentStatus.ROLLED_BACK
             self.store.put("deployments", dep.deployment_id, dep.to_dict())
+            self._ev(
+                "deployment.rollback",
+                entity_id=deployment_id,
+                project_id=dep.project_id,
+                release_id=plan.rollback_release_id,
+                deployment_id=deployment_id,
+                actor_id=authorized_by,
+                outcome="rolled_back",
+            )
         return result
 
     # ── audit / provenance ──────────────────────────────────────────────
 
     def audit_log(self, *, limit: int = 50) -> List[dict]:
-        """Lightweight local audit trail of stored entities."""
         entries = []
         for col in ("projects", "changesets", "builds", "releases", "deployments"):
             for v in self.store.list_values(col, limit=limit):
-                entries.append({"collection": col, "id": v.get(f"{col[:-1]}_id") or v.get("project_id") or "", "record": v})
+                entries.append(
+                    {
+                        "collection": col,
+                        "id": v.get(f"{col[:-1]}_id") or v.get("project_id") or "",
+                        "record": v,
+                    }
+                )
         return entries[:limit]
+
+    def evidence_chain(self) -> List[str]:
+        return self.evidence.chain_hashes()
