@@ -21,8 +21,9 @@ def svc() -> ConfluxService:
 def test_status(svc: ConfluxService):
     st = svc.status()
     assert st["service"] == "conflux"
-    assert st["version"] == "0.1.0"
+    assert st["version"] == "0.1.1"
     assert "project_registry" in st["capabilities"]
+    assert "evidence" in st
 
 
 def test_project_and_source(svc: ConfluxService):
@@ -60,7 +61,6 @@ def test_changeset_conflict_and_approve(svc: ConfluxService):
     result = svc.reconcile_changeset(cs1.changeset_id, peer_ids=[cs2.changeset_id])
     assert result["ok"] is False
     assert "conflicts" in result
-    # No silent merge
     cs1b = svc.get_changeset(cs1.changeset_id)
     assert cs1b and cs1b.status == ChangesetStatus.CONFLICTING
 
@@ -115,7 +115,7 @@ def test_release_immutable_promote(svc: ConfluxService):
     assert pr["ok"] is True
     rel2 = svc.get_release(rel.release_id)
     assert rel2 and rel2.status == ReleaseStatus.PROMOTED
-    assert rel2.content_hash == h  # identity unchanged
+    assert rel2.content_hash == h
 
 
 def test_dry_run_deployment(svc: ConfluxService):
@@ -137,7 +137,6 @@ def test_unauthorized_non_dry_run_forced_to_dry_or_fail(svc: ConfluxService):
     assert rel
     plan = svc.plan_deployment(p.project_id, rel.release_id, "host-1", adapter="local")
     assert plan
-    # local disabled → forced dry_run at plan time
     assert plan.adapter == "dry_run"
 
 
