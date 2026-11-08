@@ -68,5 +68,15 @@ def mount_optional_ops(
     except Exception as e:
         logger.warning(f"clock_ops: {e}")
 
+    try:
+        m = _import_mount("conflux_ops")
+        ok = m.mount_conflux_ops(app)
+        if ok:
+            mounted.append("conflux")
+        else:
+            logger.warning("conflux_ops mounted=False (see conflux_ops logs)")
+    except Exception as e:
+        logger.warning(f"conflux_ops: {e}")
+
     logger.info(f"optional ops mounted: {mounted or 'NONE'}")
     return mounted

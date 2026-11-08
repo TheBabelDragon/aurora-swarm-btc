@@ -1,5 +1,7 @@
 """Conflux HTTP API — independently mounted under /conflux/*.
 
+Mutations require API key (when configured) + AEGIS-authenticated actor
+with explicit conflux:* capabilities. Reads remain open by default.
 Never returns secrets. Accepted != succeeded for async-style operations.
 """
 
@@ -9,7 +11,7 @@ import logging
 import os
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("conflux.routes")
@@ -18,8 +20,21 @@ logger = logging.getLogger("conflux.routes")
 def _api_key_ok(x_api_key: Optional[str]) -> bool:
     expected = os.getenv("AURORA_DASHBOARD_API_KEY", "").strip()
     if not expected:
-        return True  # open when unset (same convention as dashboard)
+        return True
     return bool(x_api_key) and x_api_key == expected
+
+
+def _authorize(actor_id: Optional[str], capability: str, x_api_key: Optional[str]) -> None:
+    from conflux.security.authorization import authorize_mutation
+
+    result = authorize_mutation(
+        actor_id=actor_id or "",
+        capability=capability,
+        api_key_ok=_api_key_ok(x_api_key),
+    )
+    if not result.allowed:
+        code = 401 if result.reason in ("api_key_invalid", "actor_id_required") else 403
+        raise HTTPException(status_code=code, detail=result.reason)
 
 
 class ProjectCreate(BaseModel):
@@ -98,22 +113,30 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
     def svc():
         return get_service()
 
-    def require_key(x_api_key: Optional[str]) -> None:
-        if not _api_key_ok(x_api_key):
-            raise HTTPException(status_code=401, detail="invalid_or_missing_api_key")
-
     @router.get("/status")
     def status():
-        return svc().status()
+        st = svc().status()
+        try:
+            from conflux.verification.evidence_bridge import EvidenceBridge
+
+            # lightweight: report if bridge class importable; service may hold instance later
+            st["evidence"] = {"module": "available"}
+        except Exception:
+            st["evidence"] = {"module": "unavailable"}
+        return st
 
     @router.get("/projects")
     def list_projects(limit: int = Query(20, ge=1, le=100)):
         return {"projects": [p.to_dict() for p in svc().list_projects(limit=limit)]}
 
     @router.post("/projects")
-    def create_project(body: ProjectCreate, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
-        p = svc().create_project(body.name, description=body.description, created_by=body.created_by)
+    def create_project(
+        body: ProjectCreate,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id or body.created_by, "conflux:project:create", x_api_key)
+        p = svc().create_project(body.name, description=body.description, created_by=body.created_by or (x_actor_id or ""))
         return {"project": p.to_dict()}
 
     @router.get("/projects/{project_id}")
@@ -128,8 +151,13 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
         return {"sources": [s.to_dict() for s in svc().list_sources(project_id)]}
 
     @router.post("/projects/{project_id}/sources")
-    def add_source(project_id: str, body: SourceCreate, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def add_source(
+        project_id: str,
+        body: SourceCreate,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id, "conflux:source:add", x_api_key)
         src = svc().add_source(
             project_id,
             kind=body.kind,
@@ -155,8 +183,12 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
         }
 
     @router.post("/changesets")
-    def create_changeset(body: ChangesetCreate, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def create_changeset(
+        body: ChangesetCreate,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id or body.author or body.agent_id, "conflux:changeset:create", x_api_key)
         cs = svc().create_changeset(
             body.project_id,
             body.source_id,
@@ -178,18 +210,52 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
         return {"changeset": cs.to_dict()}
 
     @router.post("/changesets/{changeset_id}/reconcile")
-    def reconcile(changeset_id: str, body: ReconcileRequest, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def reconcile(
+        changeset_id: str,
+        body: ReconcileRequest,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id, "conflux:changeset:reconcile", x_api_key)
         return svc().reconcile_changeset(changeset_id, peer_ids=body.peer_ids)
 
     @router.post("/changesets/{changeset_id}/approve")
-    def approve(changeset_id: str, body: ApproveRequest, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
-        return svc().approve_changeset(changeset_id, approved_by=body.approved_by)
+    def approve(
+        changeset_id: str,
+        body: ApproveRequest,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        actor = x_actor_id or body.approved_by
+        _authorize(actor, "conflux:changeset:approve", x_api_key)
+        result = svc().approve_changeset(changeset_id, approved_by=body.approved_by)
+        # Evidence
+        try:
+            bridge = getattr(svc(), "evidence", None)
+            if bridge is None:
+                from conflux.verification.evidence_bridge import EvidenceBridge
+
+                bridge = EvidenceBridge()
+            if result.get("ok") and bridge.available:
+                h = bridge.record(
+                    "changeset.approval",
+                    entity_id=changeset_id,
+                    actor_id=body.approved_by,
+                    outcome="approved",
+                )
+                if h:
+                    result["evidence_hash"] = h
+        except Exception:
+            pass
+        return result
 
     @router.post("/builds")
-    def create_build(body: BuildCreate, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def create_build(
+        body: BuildCreate,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id, "conflux:build:create", x_api_key)
         rec = svc().create_build(
             body.project_id,
             body.source_revision_id,
@@ -224,8 +290,12 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
         return {"artifact": a.to_dict()}
 
     @router.post("/releases")
-    def create_release(body: ReleaseCreate, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def create_release(
+        body: ReleaseCreate,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id or body.created_by, "conflux:release:create", x_api_key)
         rel = svc().create_release(
             body.project_id,
             body.version,
@@ -250,13 +320,22 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
         return {"release": r.to_dict()}
 
     @router.post("/releases/{release_id}/promote")
-    def promote(release_id: str, body: PromoteRequest, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def promote(
+        release_id: str,
+        body: PromoteRequest,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id or body.promoted_by, "conflux:release:promote", x_api_key)
         return svc().promote_release(release_id, promoted_by=body.promoted_by)
 
     @router.post("/deployments/plan")
-    def plan_deploy(body: DeployPlanRequest, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def plan_deploy(
+        body: DeployPlanRequest,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id or body.created_by, "conflux:deployment:plan", x_api_key)
         plan = svc().plan_deployment(
             body.project_id,
             body.release_id,
@@ -270,8 +349,12 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
         return {"plan": plan.to_dict()}
 
     @router.post("/deployments/execute")
-    def exec_deploy(body: DeployExecuteRequest, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def exec_deploy(
+        body: DeployExecuteRequest,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id or body.authorized_by, "conflux:deployment:execute", x_api_key)
         return svc().execute_deployment(body.plan_id, authorized_by=body.authorized_by)
 
     @router.get("/deployments")
@@ -290,8 +373,13 @@ def create_conflux_router(get_service: Callable[[], Any]) -> APIRouter:
         return {"deployment": d.to_dict()}
 
     @router.post("/deployments/{deployment_id}/rollback")
-    def rollback(deployment_id: str, body: RollbackRequest, x_api_key: Optional[str] = Header(None)):
-        require_key(x_api_key)
+    def rollback(
+        deployment_id: str,
+        body: RollbackRequest,
+        x_api_key: Optional[str] = Header(None),
+        x_actor_id: Optional[str] = Header(None, alias="X-Actor-Id"),
+    ):
+        _authorize(x_actor_id or body.authorized_by, "conflux:deployment:rollback", x_api_key)
         return svc().rollback_deployment(deployment_id, authorized_by=body.authorized_by)
 
     @router.get("/audit")

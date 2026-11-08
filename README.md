@@ -13,6 +13,7 @@ TORRENT     piece transport
 BTC         scarce external temporal ordering
 HISTORY     replicated artifact memory
 EVIDENCE    integrity-checked evidence objects (mods/evidence_integrity)
+CONFLUX     software source → build → release → deploy coordination
 ```
 
 Bitcoin is not the artifact store.
@@ -45,6 +46,29 @@ swarm peers
 ```
 
 Public verbs: `ensure` / `publish` / `possession` / `history` / `clock` / `verify`.
+
+## Conflux (software lifecycle)
+
+Agent-native source control, changesets, builds, releases, and **dry-run** deployment coordination (`conflux/`).
+
+```
+Project → Git source adapter → Changeset → Build → Artifact → Release → Deployment
+                │                  │           │                  │
+                └──── Evidence Integrity bridge (append-only) ────┘
+```
+
+- **Git is a protocol adapter**, not the permanent foundation.
+- Runners and real deploy are **off by default**.
+- Mutations require AEGIS-42 capabilities (`conflux:*`) + optional API key.
+- Control plane entity: `aurora.conflux`.
+- API: `/conflux/*` · mount health: `/conflux-mount/status`
+
+```bash
+curl -s http://127.0.0.1:8000/conflux/status | python -m json.tool
+python -m pytest tests/test_conflux.py tests/test_conflux_security.py tests/test_conflux_evidence.py -q
+```
+
+Docs: `docs/CONFLUX_ARCHITECTURE.md`, `docs/CONFLUX_SECURITY.md`, `docs/CONFLUX_OPERATIONS.md`.
 
 ## Shared Evidence Contract
 
@@ -98,6 +122,7 @@ Optional edits in `.env`:
 | `AURORA_DASHBOARD_API_KEY` | If set, mutation APIs require `X-API-Key` |
 | `AURORA_MESH_SECRET` | Shared HMAC secret for LAN discovery auth |
 | `AEGIS_ENABLED` | AEGIS-42 security oversight (default `1`; set `0` to disable) |
+| `CONFLUX_REQUIRE_AEGIS` | Fail closed on Conflux mutations without AEGIS (default `1`) |
 
 Solo Redis binds **127.0.0.1 only** (no unauthenticated exposure on the LAN).
 
@@ -125,6 +150,7 @@ xdg-open http://127.0.0.1:8000
 
 - **Start mining** when you want hashes (CPU path is default).
 - **Comms / Destination Routing** panels work without curl.
+- **Conflux** panel for software lifecycle (mutations need provisioned actor).
 - Mesh join on the same LAN is automatic via UDP **7379** when discovery is enabled.
 
 ### 5. Sanity checks
@@ -133,6 +159,7 @@ xdg-open http://127.0.0.1:8000
 curl -s http://127.0.0.1:8000/comms/status | python -m json.tool
 curl -s http://127.0.0.1:8000/comms/network/status | python -m json.tool
 curl -s http://127.0.0.1:8000/aegis/status | python -m json.tool
+curl -s http://127.0.0.1:8000/conflux/status | python -m json.tool
 docker compose -f docker-compose.solo.yml logs --tail=50 dashboard
 ```
 
@@ -221,7 +248,8 @@ Full design, threat model, and non-goals: **`docs/AEGIS_42.md`**.
 |-------|------|
 | `comms/layer.py` | Mesh: register, heartbeat, targeted + broadcast |
 | `comms/routing/` | Destination discovery + gateway routing |
-| `dashboard/` | UI + mining status + routing panel + artifact clock |
+| `dashboard/` | UI + mining status + routing panel + artifact clock + Conflux |
+| `conflux/` | Software lifecycle: source, changeset, build, release, deploy |
 | `mods/aegis_42` | Security oversight: policy, identity, audit, containment |
 | `mods/mining_engine` | Stratum / CPU hashing |
 | `mods/asset_fabric` | Asset object, possession, history, Bitcoin clock |
@@ -251,6 +279,7 @@ Unanchored artifacts are valid assets with no authoritative Bitcoin epoch.
 - Optional `AURORA_DASHBOARD_API_KEY` protects mutation endpoints
 - Public TCP relay remains disabled
 - AEGIS-42 enabled by default; model-independent baseline policy on node boot
+- Conflux runners/deploy off by default; mutations fail closed without AEGIS when required
 
 ---
 
@@ -263,7 +292,10 @@ python -m pytest tests/test_destination_routing.py \
   tests/test_routing_live_caller.py \
   tests/test_routing_security_hardening.py \
   tests/test_evidence_integrity.py \
-  tests/test_aegis_42.py -q
+  tests/test_aegis_42.py \
+  tests/test_conflux.py \
+  tests/test_conflux_security.py \
+  tests/test_conflux_evidence.py -q
 ```
 
 ---
@@ -284,6 +316,8 @@ See `INTEGRATION_CONTRACT.md`.
 | `docs/DESTINATION_ROUTING.md` | Destination resolve, routes, delivery semantics |
 | `docs/SHARED_EVIDENCE_CONTRACT.md` | Evidence integrity |
 | `docs/AEGIS_42.md` | Security oversight architecture and threat model |
+| `docs/CONFLUX_ARCHITECTURE.md` | Conflux software lifecycle |
+| `docs/CONFLUX_SECURITY.md` | Conflux AEGIS capabilities + operator provisioning |
 | `docs/ARCHITECTURE.md` | Layer stack (content → fabric → torrent → BTC) |
 | `INTEGRATION_CONTRACT.md` | Sensing ↔ swarm ↔ MetaField |
 
