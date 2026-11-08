@@ -182,6 +182,25 @@ def nodes():
         return {"nodes": [], "error": str(e)}
 
 
+def _inject_conflux_panel(html: str) -> str:
+    """Inject Conflux panel fragment and script if not already present."""
+    if "conflux_panel" in html and "/ux/conflux.js" in html:
+        return html
+    panel = ""
+    panel_path = Path(__file__).resolve().parent / "conflux_panel.html"
+    try:
+        panel = panel_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("conflux_panel.html missing: %s", e)
+        panel = '<div class="card" id="conflux_panel"><h2>Conflux</h2><p class="muted">Panel fragment missing</p></div>'
+    script_tag = '<script src="/ux/conflux.js"></script>\n'
+    if "</body>" in html:
+        html = html.replace("</body>", panel + "\n" + script_tag + "</body>", 1)
+    else:
+        html = html + panel + script_tag
+    return html
+
+
 @app.get("/", response_class=HTMLResponse)
 def root():
     p = Path(__file__).resolve().parent / "home_template.html"
@@ -191,4 +210,5 @@ def root():
         html = "<h1>Aurora</h1><p>home_template.html missing — rebuild image</p>"
     if "/ux/mine.js" not in html:
         html = html.replace("</body>", '<script src="/ux/mine.js"></script>\n</body>')
+    html = _inject_conflux_panel(html)
     return HTMLResponse(content=html)
