@@ -78,8 +78,6 @@ class ConfluxService:
             logger.debug("evidence record skipped: %s", e)
             return None
 
-    # ── status ──────────────────────────────────────────────────────────
-
     def status(self) -> dict:
         return {
             "service": "conflux",
@@ -101,8 +99,6 @@ class ConfluxService:
                 "evidence_bridge",
             ],
         }
-
-    # ── projects ────────────────────────────────────────────────────────
 
     def create_project(self, name: str, *, description: str = "", created_by: str = "") -> Project:
         p = Project.new(name, description=description, created_by=created_by)
@@ -166,8 +162,6 @@ class ConfluxService:
             self.store.put("revisions", rev.revision_id, rev.to_dict())
         return rev
 
-    # ── changesets ──────────────────────────────────────────────────────
-
     def create_changeset(
         self,
         project_id: str,
@@ -230,15 +224,12 @@ class ConfluxService:
             result["evidence_hash"] = h
             cs = self.changes.get(changeset_id)
             if cs:
-                cs.evidence_refs = list(getattr(cs, "evidence_refs", []) or []) + [h]
-                # best-effort: store may already hold the changeset from approve
+                cs.provenance_refs = list(cs.provenance_refs or []) + [h]
                 try:
                     self.store.put("changesets", cs.changeset_id, cs.to_dict())
                 except Exception:
                     pass
         return result
-
-    # ── builds ──────────────────────────────────────────────────────────
 
     def create_build(
         self,
@@ -328,8 +319,6 @@ class ConfluxService:
         d = self.store.get("artifacts", artifact_id)
         return ArtifactRef.from_dict(d) if d else None
 
-    # ── releases ────────────────────────────────────────────────────────
-
     def create_release(
         self,
         project_id: str,
@@ -410,8 +399,6 @@ class ConfluxService:
             rel.approval_evidence_ids = list(rel.approval_evidence_ids or []) + [h]
         self.store.put("releases", rel.release_id, rel.to_dict())
         return {"ok": True, "release": rel.to_dict(), "evidence_hash": h}
-
-    # ── deployments ─────────────────────────────────────────────────────
 
     def plan_deployment(
         self,
@@ -539,8 +526,6 @@ class ConfluxService:
                 outcome="rolled_back",
             )
         return result
-
-    # ── audit / provenance ──────────────────────────────────────────────
 
     def audit_log(self, *, limit: int = 50) -> List[dict]:
         entries = []
