@@ -1,0 +1,22 @@
+{
+  "name": "conflux",
+  "version": "0.1.0",
+  "schema_id": "aurora.conflux",
+  "description": "Agent-native source control, artifact lifecycle, and deployment coordination",
+  "capabilities": [
+    "project_registry",
+    "git_source",
+    "changesets",
+    "reconciliation",
+    "build_records",
+    "immutable_releases",
+    "dry_run_deployment"
+  ],
+  "api_prefix": "/conflux",
+  "safety": {
+    "runner_default": "disabled",
+    "deploy_default": "dry_run",
+    "rewrites_history": false,
+    "bitcoin_required": false
+  }
+}
